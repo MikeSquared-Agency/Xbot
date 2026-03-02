@@ -1,0 +1,15 @@
+services:
+  cortex:
+    image: mikesquared/cortex:latest
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+      - "9091:9091"
+    volumes:
+      - ./data/cortex:/data
+    command: serve --data-dir /data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
