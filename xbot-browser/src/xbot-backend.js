@@ -5,7 +5,8 @@ const playwrightMcpDir = path.dirname(require.resolve('playwright/lib/mcp/progra
 const { BrowserServerBackend } = require(path.join(playwrightMcpDir, 'browser', 'browserServerBackend'));
 const { toMcpTool } = require(path.join(playwrightMcpDir, 'sdk', 'tool'));
 const { z } = require('playwright-core/lib/mcpBundle');
-const { ActionStore, extractDomain } = require('./action-store');
+const { CortexStore, extractDomain } = require('./cortex/cortex-store');
+const { ensureCortexRunning } = require('./cortex/cortex-process');
 const { translateAction } = require('./action-translator');
 const { ToolRegistry } = require('./tools/registry');
 const { FallbackTracker } = require('./tools/fallback');
@@ -25,13 +26,22 @@ const {
 class XbotBackend {
   constructor(config, browserContextFactory, options = {}) {
     this._inner = new BrowserServerBackend(config, browserContextFactory, { allTools: true });
-    this._store = new ActionStore();
+    this._store = new CortexStore({
+      httpBase: process.env.CORTEX_HTTP || 'http://localhost:9091',
+      timeoutMs: parseInt(process.env.CORTEX_TIMEOUT_MS || '2000', 10),
+    });
     this._registry = new ToolRegistry(this._store);
     this._fallback = new FallbackTracker();
     this._sessionFile = options.sessionFile || null;
   }
 
   async initialize(clientInfo) {
+    await ensureCortexRunning({
+      httpBase: process.env.CORTEX_HTTP || 'http://localhost:9091',
+      dataDir: process.env.CORTEX_DATA_DIR || './data/cortex',
+      configPath: './cortex.toml',
+      autostart: process.env.CORTEX_AUTOSTART !== 'false',
+    });
     await this._inner.initialize(clientInfo);
   }
 
