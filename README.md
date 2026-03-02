@@ -34,6 +34,8 @@ xbot/
 ├── xbot-browser/               # MCP server (Node.js)
 │   ├── src/
 │   │   ├── xbot-backend.js         # Main orchestrator
+│   │   ├── action-store.js          # In-memory store + local embeddings
+│   │   ├── utils.js                 # Shared utilities (extractDomain, matchUrlPattern)
 │   │   ├── action-translator.js     # Tool → Playwright code generator
 │   │   ├── action-tools.js          # MCP tool schemas
 │   │   ├── action-schema.js         # Validation schemas (Zod)
