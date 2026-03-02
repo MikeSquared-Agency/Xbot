@@ -1,0 +1,40 @@
+{
+  "name": "xbot-browser",
+  "version": "0.0.68",
+  "description": "Xbot Browser - MCP server for browser automation via Playwright",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DarlingtonDeveloper/Xbot.git"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "author": "Xbot contributors",
+  "license": "Apache-2.0",
+  "scripts": {
+    "test": "playwright test",
+    "ctest": "playwright test --project=chrome",
+    "train:x": "node scripts/train-x-tools.js"
+  },
+  "exports": {
+    "./package.json": "./package.json",
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    }
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^3.8.1",
+    "pg": "^8.19.0",
+    "playwright": "1.59.0-alpha-1771104257000",
+    "playwright-core": "1.59.0-alpha-1771104257000"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.25.2",
+    "@playwright/test": "1.59.0-alpha-1771104257000",
+    "@types/node": "^24.3.0"
+  },
+  "bin": {
+    "xbot-browser": "cli.js"
+  }
+}

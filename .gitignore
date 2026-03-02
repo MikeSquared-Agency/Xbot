@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Environment / secrets
+.env
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Test artifacts
+test-results/
+playwright-report/
+
+# Generated test certificates
+xbot-browser/tests/testserver/*.pem
+
+# Browser sessions
+sessions/
+
+# Supabase temp
+supabase/.temp/
