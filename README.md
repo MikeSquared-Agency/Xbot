@@ -49,7 +49,11 @@ xbot/
 ## Prerequisites
 
 - [Node.js](https://nodejs.org/) >= 18
-- A PostgreSQL database with the [pgvector](https://github.com/pgvector/pgvector) extension
+- **Cortex** — graph memory engine:
+  ```bash
+  curl -sSf https://raw.githubusercontent.com/MikeSquared-Agency/cortex/main/install.sh | sh
+  ```
+  First run downloads the embedding model (~150MB, 1-2 min).
 
 ## Setup
 
@@ -60,24 +64,15 @@ git clone https://github.com/DarlingtonDeveloper/Xbot.git
 cd Xbot
 ```
 
-### 2. Set up the database
-
-```bash
-psql $DATABASE_URL -f supabase/migrations/0001_init_schema.sql
-psql $DATABASE_URL -f supabase/migrations/0005_xbot_schema.sql
-```
-
-### 3. Configure environment
+### 2. Configure environment
 
 ```bash
 cp .env.example .env
 ```
 
-| Variable | Description |
-|----------|-------------|
-| `DATABASE_URL` | PostgreSQL connection string |
+Fill in your API keys.
 
-### 4. Install xbot-browser
+### 3. Install xbot-browser
 
 ```bash
 cd xbot-browser
@@ -85,7 +80,12 @@ npm install
 npx playwright install
 ```
 
-### 5. Train X tools (optional)
+Cortex starts automatically when xbot-browser starts (`CORTEX_AUTOSTART=true`).
+
+- Or start manually: `cortex serve`
+- Inspect the graph: http://localhost:9091/viz
+
+### 4. Train X tools (optional)
 
 ```bash
 npm run train:x
