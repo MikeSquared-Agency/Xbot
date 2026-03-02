@@ -5,7 +5,8 @@ const playwrightMcpDir = path.dirname(require.resolve('playwright/lib/mcp/progra
 const { BrowserServerBackend } = require(path.join(playwrightMcpDir, 'browser', 'browserServerBackend'));
 const { toMcpTool } = require(path.join(playwrightMcpDir, 'sdk', 'tool'));
 const { z } = require('playwright-core/lib/mcpBundle');
-const { ActionStore, extractDomain } = require('./action-store');
+const { CortexStore, extractDomain } = require('./cortex/cortex-store');
+const { ensureCortexRunning } = require('./cortex/cortex-process');
 const { translateAction } = require('./action-translator');
 const { ToolRegistry } = require('./tools/registry');
 const { FallbackTracker } = require('./tools/fallback');
@@ -25,13 +26,22 @@ const {
 class XbotBackend {
   constructor(config, browserContextFactory, options = {}) {
     this._inner = new BrowserServerBackend(config, browserContextFactory, { allTools: true });
-    this._store = new ActionStore();
+    this._store = new CortexStore({
+      httpBase: process.env.CORTEX_HTTP || 'http://localhost:9091',
+      timeoutMs: parseInt(process.env.CORTEX_TIMEOUT_MS || '2000', 10),
+    });
     this._registry = new ToolRegistry(this._store);
     this._fallback = new FallbackTracker();
     this._sessionFile = options.sessionFile || null;
   }
 
   async initialize(clientInfo) {
+    await ensureCortexRunning({
+      httpBase: process.env.CORTEX_HTTP || 'http://localhost:9091',
+      dataDir: process.env.CORTEX_DATA_DIR || './data/cortex',
+      configPath: './cortex.toml',
+      autostart: process.env.CORTEX_AUTOSTART !== 'false',
+    });
     await this._inner.initialize(clientInfo);
   }
 
@@ -142,6 +152,24 @@ class XbotBackend {
         const spaUrl = extractFinalUrl(spaResult);
         if (spaUrl && spaUrl !== this._registry.currentUrl) {
           await this._registry.lookupToolsForUrl(spaUrl);
+        }
+      } catch {}
+    }
+
+    // Inject Cortex domain briefing if available
+    if (this._registry.currentDomain && this._registry.currentTools.length > 0) {
+      try {
+        const briefingUrl = `${this._store._httpBase || 'http://localhost:9091'}/briefing/xbot?compact=true`;
+        const res = await fetch(briefingUrl, { signal: AbortSignal.timeout(2000) }).catch(() => null);
+        if (res?.ok) {
+          const json = await res.json();
+          if (json.success && json.data?.rendered) {
+            const briefing = postProcessBriefing(json.data.rendered, 600);
+            if (briefing) {
+              const briefingBlock = `<domain-memory domain="${this._registry.currentDomain}">\n${briefing}\n</domain-memory>\n\n`;
+              result = prependTextToResult(result, briefingBlock);
+            }
+          }
         }
       } catch {}
     }
@@ -386,6 +414,10 @@ ${toolList}
       // All fallbacks failed — increment failure count
       if (tool.id) {
         const newCount = await this._store.incrementFailureCount(tool.id);
+        // Decay importance on repeated failure
+        if (newCount >= 2) {
+          this._boostImportance(tool.id, -0.1);
+        }
         if (newCount >= 3) {
           result = appendTextToResult(result, `\n\n<relearn-nudge>This tool has failed ${newCount} times. Its selectors may be outdated. Use browser_snapshot to inspect the page and update the tool with add_update-tool.</relearn-nudge>`);
         }
@@ -395,8 +427,37 @@ ${toolList}
       await this._store.resetFailureCount(tool.id);
     }
 
+    // Fire-and-forget importance boost on success
+    if (!result.isError && tool.id) {
+      this._boostImportance(tool.id, 0.05);
+    }
+
     const header = `### Executed: ${tool.name}\n`;
     return prependTextToResult(result, header);
+  }
+
+  // ─── Importance feedback ───
+
+  /**
+   * Fire-and-forget importance adjustment via Cortex PATCH.
+   * Positive delta = boost, negative = decay. Clamps to [0.1, 1.0].
+   */
+  _boostImportance(nodeId, delta) {
+    const httpBase = process.env.CORTEX_HTTP || 'http://localhost:9091';
+    fetch(`${httpBase}/nodes/${nodeId}`, { signal: AbortSignal.timeout(2000) })
+      .then(res => res.ok ? res.json() : null)
+      .then(json => {
+        if (!json?.success) return;
+        const current = json.data.importance || 0.5;
+        const adjusted = Math.max(0.1, Math.min(1.0, current + delta));
+        return fetch(`${httpBase}/nodes/${nodeId}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ importance: adjusted }),
+          signal: AbortSignal.timeout(2000),
+        });
+      })
+      .catch(() => {}); // intentionally swallowed — fire-and-forget
   }
 
   // ─── xbot_memory (semantic search) ───
@@ -765,6 +826,16 @@ function summarizeArgs(toolName, args) {
       return json.length > 100 ? json.slice(0, 97) + '...' : json;
     }
   }
+}
+
+function postProcessBriefing(raw, maxTokens) {
+  if (!raw) return '';
+  const charLimit = maxTokens * 4;
+  const stripped = raw.replace(/[#*`_~[\]]/g, '').trim();
+  if (stripped.length === 0) return '';
+  return stripped.length > charLimit
+    ? stripped.slice(0, charLimit) + '... [truncated]'
+    : stripped;
 }
 
 function extractFinalUrl(result) {

@@ -26,7 +26,6 @@
   },
   "dependencies": {
     "@huggingface/transformers": "^3.8.1",
-    "pg": "^8.19.0",
     "playwright": "1.59.0-alpha-1771104257000",
     "playwright-core": "1.59.0-alpha-1771104257000"
   },

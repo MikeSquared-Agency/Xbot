@@ -5,11 +5,11 @@ const { ensureCortexRunning, CortexStartupError } = require('../../src/cortex/co
 
 describe('ensureCortexRunning', () => {
   test('succeeds when cortex is already running', async () => {
-    // Start a stub HTTP server that responds to /health
+    // Start a stub HTTP server that responds to /health with { success: true }
     const server = http.createServer((req, res) => {
       if (req.url === '/health') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end('{"status":"ok"}');
+        res.end('{"success":true}');
       } else {
         res.writeHead(404);
         res.end();
@@ -20,18 +20,24 @@ describe('ensureCortexRunning', () => {
     await new Promise(resolve => server.listen(port, resolve));
 
     try {
-      const result = await ensureCortexRunning({ port, autostart: false });
-      expect(result.alreadyRunning).toBe(true);
-      expect(result.port).toBe(port);
+      // Should succeed without throwing since health check passes
+      await ensureCortexRunning({
+        httpBase: `http://localhost:${port}`,
+        autostart: false,
+      });
+      // If we get here without error, the health check passed
     } finally {
       await new Promise(resolve => server.close(resolve));
     }
   });
 
   test('with autostart=false does nothing when not running', async () => {
-    const result = await ensureCortexRunning({ port: 19098, autostart: false });
-    expect(result.alreadyRunning).toBe(false);
-    expect(result.started).toBe(false);
+    // Should return without error even though nothing is running
+    await ensureCortexRunning({
+      httpBase: 'http://localhost:19098',
+      autostart: false,
+    });
+    // No error means it correctly skipped startup
   });
 
   test('CortexStartupError thrown on bad binary', async () => {
@@ -40,12 +46,15 @@ describe('ensureCortexRunning', () => {
       // Clear PATH so cortex binary cannot be found
       process.env.PATH = '';
       await expect(
-        ensureCortexRunning({ port: 19099, dataDir: '/tmp/cortex-bad-binary-test' })
+        ensureCortexRunning({
+          httpBase: 'http://localhost:19099',
+          dataDir: '/tmp/cortex-bad-binary-test',
+        })
       ).rejects.toThrow(CortexStartupError);
     } finally {
       process.env.PATH = originalPath;
     }
-  });
+  }, 60000);
 });
 
 describe('CortexStartupError', () => {

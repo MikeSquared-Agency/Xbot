@@ -1,77 +1,87 @@
 'use strict';
 
-const { execSync, spawn } = require('child_process');
+const { spawn } = require('child_process');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 
 class CortexStartupError extends Error {
-  constructor(message, cause) {
-    super(message);
+  constructor(msg) {
+    super(msg);
     this.name = 'CortexStartupError';
-    if (cause) this.cause = cause;
   }
 }
 
-function findCortexBinary() {
-  try {
-    return execSync('which cortex', { encoding: 'utf-8' }).trim();
-  } catch {}
+/**
+ * Ensure Cortex is running. Starts it if CORTEX_AUTOSTART is true and it's not already up.
+ *
+ * @param {object} config
+ * @param {string} config.httpBase - e.g., 'http://localhost:9091'
+ * @param {string} config.dataDir - path to Cortex data directory
+ * @param {string} [config.configPath] - path to cortex.toml
+ * @param {boolean} [config.autostart=true]
+ */
+async function ensureCortexRunning(config) {
+  if (config.autostart === false) return;
 
-  const fs = require('fs');
-  const path = require('path');
-  const candidates = [
-    path.join(process.env.HOME || '', '.cortex', 'bin', 'cortex'),
-    '/usr/local/bin/cortex',
-  ];
-  for (const p of candidates) {
-    try {
-      fs.accessSync(p, fs.constants.X_OK);
-      return p;
-    } catch {}
+  const healthUrl = `${config.httpBase}/health`;
+
+  // Already running?
+  if (await isHealthy(healthUrl)) {
+    console.info('[cortex] Already running');
+    return;
   }
-  return null;
+
+  // Check if model cache exists (first run takes longer)
+  const modelCacheDir = path.join(os.homedir(), '.cache', 'cortex', 'models');
+  const modelCacheExists = fs.existsSync(modelCacheDir);
+  const timeoutMs = modelCacheExists ? 10_000 : 45_000;
+
+  if (!modelCacheExists) {
+    console.info('[cortex] First run — embedding model download expected (~150MB, up to 45s)');
+  }
+
+  console.info('[cortex] Starting...');
+
+  const args = ['serve'];
+  if (config.dataDir) args.push('--data-dir', config.dataDir);
+  if (config.configPath) args.push('--config', config.configPath);
+
+  const child = spawn('cortex', args, { stdio: 'ignore', detached: false });
+
+  child.on('error', (err) => {
+    console.error('[cortex] Failed to start:', err.message);
+  });
+
+  process.on('exit', () => {
+    try { child.kill(); } catch {}
+  });
+
+  await waitForHealth(healthUrl, timeoutMs);
+  console.info('[cortex] Ready');
 }
 
-async function ensureCortexRunning({ port = 7700, dataDir, autostart = true } = {}) {
-  // Probe existing instance
+async function isHealthy(url) {
   try {
-    const res = await fetch(`http://localhost:${port}/health`, {
-      signal: AbortSignal.timeout(2000),
-    });
-    if (res.ok) {
-      return { port, alreadyRunning: true, started: false };
-    }
-  } catch {}
-
-  if (!autostart) {
-    return { port, alreadyRunning: false, started: false };
+    const res = await fetch(url, { signal: AbortSignal.timeout(2000) });
+    if (!res.ok) return false;
+    const body = await res.json();
+    return body.success === true;
+  } catch {
+    return false;
   }
+}
 
-  const binary = findCortexBinary();
-  if (!binary) {
-    throw new CortexStartupError('cortex binary not found in PATH or standard locations');
-  }
-
-  const args = ['serve', '--http-port', String(port)];
-  if (dataDir) args.push('--data-dir', dataDir);
-
-  const child = spawn(binary, args, { detached: true, stdio: 'ignore' });
-  child.unref();
-
-  // Wait for health
-  const deadline = Date.now() + 15000;
+async function waitForHealth(url, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    try {
-      const res = await fetch(`http://localhost:${port}/health`, {
-        signal: AbortSignal.timeout(1000),
-      });
-      if (res.ok) {
-        return { port, alreadyRunning: false, started: true, pid: child.pid };
-      }
-    } catch {}
+    if (await isHealthy(url)) return;
     await new Promise(r => setTimeout(r, 500));
   }
-
-  try { child.kill(); } catch {}
-  throw new CortexStartupError(`cortex did not become healthy on port ${port} within 15s`);
+  throw new CortexStartupError(
+    `Cortex did not become healthy within ${timeoutMs}ms. ` +
+    `Install: curl -sSf https://raw.githubusercontent.com/MikeSquared-Agency/cortex/main/install.sh | sh`
+  );
 }
 
 module.exports = { ensureCortexRunning, CortexStartupError };

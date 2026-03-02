@@ -1,35 +1,15 @@
 'use strict';
 
-const { Pool } = require('pg');
-const path = require('path');
+const { extractDomain, matchUrlPattern } = require('./utils');
 
-// Load .env from project root
-const envPath = path.join(__dirname, '..', '..', '.env');
-try {
-  const fs = require('fs');
-  const envContent = fs.readFileSync(envPath, 'utf-8');
-  for (const line of envContent.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) continue;
-    const eqIdx = trimmed.indexOf('=');
-    if (eqIdx < 0) continue;
-    const key = trimmed.slice(0, eqIdx);
-    const val = trimmed.slice(eqIdx + 1);
-    if (!process.env[key]) process.env[key] = val;
-  }
-} catch {}
+let _nextConfigId = 1;
+let _nextToolId = 1;
 
 class ActionStore {
   constructor() {
-    if (!process.env.DATABASE_URL)
-      throw new Error('Missing required environment variable: DATABASE_URL');
-
-    const poolConfig = { connectionString: process.env.DATABASE_URL };
-    if (process.env.DATABASE_SSL === 'true')
-      poolConfig.ssl = { rejectUnauthorized: process.env.DATABASE_SSL_REJECT_UNAUTHORIZED !== 'false' };
-
-    this._pool = new Pool(poolConfig);
-    this._embedder = null; // Lazy-loaded local embedding pipeline
+    this._configs = new Map();
+    this._tools = new Map();
+    this._embedder = null;
   }
 
   // ─── Embedding (local, via @huggingface/transformers) ───
@@ -46,120 +26,114 @@ class ActionStore {
   // ─── Config CRUD ───
 
   async createConfig({ domain, urlPattern, title, description, tags }) {
+    const id = String(_nextConfigId++);
+    const now = new Date().toISOString();
     const resolvedTitle = title || domain;
     const resolvedDescription = description || '';
     const resolvedTags = tags || [];
 
     const embedInput = `${resolvedTitle}. ${resolvedDescription}. ${resolvedTags.join(' ')}`;
     const embedding = await this._embed(embedInput);
-    const embeddingStr = '[' + embedding.join(',') + ']';
 
-    const res = await this._pool.query(
-      `INSERT INTO configs (domain, url_pattern, title, description, tags, embedding)
-       VALUES ($1, $2, $3, $4, $5, $6::vector)
-       RETURNING *`,
-      [domain, urlPattern || '/*', resolvedTitle, resolvedDescription, tags ? JSON.stringify(tags) : null, embeddingStr]
-    );
-    return res.rows[0];
+    const config = {
+      id,
+      domain,
+      url_pattern: urlPattern || '/*',
+      title: resolvedTitle,
+      description: resolvedDescription,
+      tags: resolvedTags,
+      embedding,
+      visit_count: 0,
+      created_at: now,
+      updated_at: now,
+    };
+    this._configs.set(id, config);
+    return config;
   }
 
   async getConfigById(configId) {
-    const res = await this._pool.query('SELECT * FROM configs WHERE id = $1', [configId]);
-    return res.rows[0] || null;
+    return this._configs.get(configId) || null;
   }
 
   async getConfigsForDomain(domain) {
-    const res = await this._pool.query('SELECT * FROM configs WHERE domain = $1', [domain]);
-    return res.rows;
+    return [...this._configs.values()].filter(c => c.domain === domain);
   }
 
   async getConfigForDomainAndPattern(domain, urlPattern) {
-    const res = await this._pool.query(
-      'SELECT * FROM configs WHERE domain = $1 AND url_pattern = $2',
-      [domain, urlPattern]
-    );
-    return res.rows[0] || null;
+    return [...this._configs.values()].find(
+      c => c.domain === domain && c.url_pattern === urlPattern
+    ) || null;
   }
 
   async updateConfig(configId, updates) {
-    const fields = [];
-    const values = [];
-    let idx = 1;
-
+    const config = this._configs.get(configId);
+    if (!config) return null;
     for (const [key, val] of Object.entries(updates)) {
       if (val === undefined) continue;
       const col = key === 'urlPattern' ? 'url_pattern' : key;
-      fields.push(`"${col}" = $${idx}`);
-      values.push(col === 'tags' ? JSON.stringify(val) : val);
-      idx++;
+      config[col] = col === 'tags' ? (Array.isArray(val) ? val : JSON.parse(val)) : val;
     }
-    if (fields.length === 0) return null;
-
-    fields.push(`"updated_at" = now()`);
-    values.push(configId);
-
-    const res = await this._pool.query(
-      `UPDATE configs SET ${fields.join(', ')} WHERE id = $${idx} RETURNING *`,
-      values
-    );
-    return res.rows[0] || null;
+    config.updated_at = new Date().toISOString();
+    return config;
   }
 
   async deleteConfig(configId) {
-    const res = await this._pool.query('DELETE FROM configs WHERE id = $1 RETURNING id', [configId]);
-    return res.rowCount > 0;
+    return this._configs.delete(configId);
   }
 
   // ─── Tool CRUD ───
 
   async addTool({ configId, name, description, inputSchema, execution }) {
-    const res = await this._pool.query(
-      `INSERT INTO tools (config_id, name, description, input_schema, execution, last_verified)
-       VALUES ($1, $2, $3, $4, $5, now())
-       RETURNING *`,
-      [configId, name, description || '', JSON.stringify(inputSchema || {}), JSON.stringify(execution || {})]
-    );
-    return res.rows[0];
+    const id = String(_nextToolId++);
+    const now = new Date().toISOString();
+    const tool = {
+      id,
+      config_id: configId,
+      name,
+      description: description || '',
+      input_schema: inputSchema || [],
+      execution: execution || {},
+      last_verified: now,
+      failure_count: 0,
+      fallback_selectors: null,
+      created_at: now,
+      updated_at: now,
+    };
+    this._tools.set(id, tool);
+    return tool;
   }
 
   async getToolById(toolId) {
-    const res = await this._pool.query('SELECT * FROM tools WHERE id = $1', [toolId]);
-    return res.rows[0] || null;
+    return this._tools.get(toolId) || null;
   }
 
   async getToolByName(configId, name) {
-    const res = await this._pool.query(
-      'SELECT * FROM tools WHERE config_id = $1 AND name = $2',
-      [configId, name]
-    );
-    return res.rows[0] || null;
+    return [...this._tools.values()].find(
+      t => t.config_id === configId && t.name === name
+    ) || null;
   }
 
   async getToolsForConfig(configId) {
-    const res = await this._pool.query(
-      'SELECT * FROM tools WHERE config_id = $1 ORDER BY created_at',
-      [configId]
-    );
-    return res.rows;
+    return [...this._tools.values()]
+      .filter(t => t.config_id === configId)
+      .sort((a, b) => a.created_at.localeCompare(b.created_at));
   }
 
   async getToolsForDomain(domain) {
-    const res = await this._pool.query(
-      `SELECT t.*, c.domain, c.url_pattern, c.title as config_title
-       FROM tools t
-       JOIN configs c ON t.config_id = c.id
-       WHERE c.domain = $1
-       ORDER BY t.created_at`,
-      [domain]
-    );
-    return res.rows;
+    const configs = await this.getConfigsForDomain(domain);
+    const configIds = new Set(configs.map(c => c.id));
+    return [...this._tools.values()]
+      .filter(t => configIds.has(t.config_id))
+      .map(t => {
+        const config = configs.find(c => c.id === t.config_id);
+        return { ...t, domain: config.domain, url_pattern: config.url_pattern, config_title: config.title };
+      })
+      .sort((a, b) => a.created_at.localeCompare(b.created_at));
   }
 
   async updateTool(toolId, updates) {
-    const fields = [];
-    const values = [];
-    let idx = 1;
-
+    const tool = this._tools.get(toolId);
+    if (!tool) return null;
     const colMap = {
       inputSchema: 'input_schema',
       configId: 'config_id',
@@ -167,49 +141,35 @@ class ActionStore {
       failureCount: 'failure_count',
       fallbackSelectors: 'fallback_selectors',
     };
-
     for (const [key, val] of Object.entries(updates)) {
       if (val === undefined) continue;
       const col = colMap[key] || key;
-      fields.push(`"${col}" = $${idx}`);
-      const jsonCols = ['input_schema', 'execution', 'fallback_selectors'];
-      values.push(jsonCols.includes(col) ? JSON.stringify(val) : val);
-      idx++;
+      tool[col] = val;
     }
-    if (fields.length === 0) return null;
-
-    fields.push(`"updated_at" = now()`);
-    values.push(toolId);
-
-    const res = await this._pool.query(
-      `UPDATE tools SET ${fields.join(', ')} WHERE id = $${idx} RETURNING *`,
-      values
-    );
-    return res.rows[0] || null;
+    tool.updated_at = new Date().toISOString();
+    return tool;
   }
 
   async deleteTool(toolId) {
-    const res = await this._pool.query('DELETE FROM tools WHERE id = $1 RETURNING id', [toolId]);
-    return res.rowCount > 0;
+    return this._tools.delete(toolId);
   }
 
   // ─── Failure tracking ───
 
   async incrementFailureCount(toolId) {
-    const res = await this._pool.query(
-      `UPDATE tools SET failure_count = failure_count + 1, updated_at = now()
-       WHERE id = $1 RETURNING failure_count`,
-      [toolId]
-    );
-    return res.rows[0]?.failure_count || 0;
+    const tool = this._tools.get(toolId);
+    if (!tool) return 0;
+    tool.failure_count = (tool.failure_count || 0) + 1;
+    tool.updated_at = new Date().toISOString();
+    return tool.failure_count;
   }
 
   async resetFailureCount(toolId) {
-    await this._pool.query(
-      `UPDATE tools SET failure_count = 0, last_verified = now(), updated_at = now()
-       WHERE id = $1`,
-      [toolId]
-    );
+    const tool = this._tools.get(toolId);
+    if (!tool) return;
+    tool.failure_count = 0;
+    tool.last_verified = new Date().toISOString();
+    tool.updated_at = new Date().toISOString();
   }
 
   // ─── Lookup helpers ───
@@ -229,101 +189,76 @@ class ActionStore {
     const matchingConfigs = configs.filter(c => matchUrlPattern(c.url_pattern, pathname));
     if (matchingConfigs.length === 0) return [];
 
-    const configIds = matchingConfigs.map(c => c.id);
-    const placeholders = configIds.map((_, i) => `$${i + 1}`).join(',');
+    for (const c of matchingConfigs) {
+      c.visit_count = (c.visit_count || 0) + 1;
+      c.updated_at = new Date().toISOString();
+    }
 
-    await this._pool.query(
-      `UPDATE configs SET visit_count = visit_count + 1, updated_at = now()
-       WHERE id IN (${placeholders})`,
-      configIds
-    );
-
-    const res = await this._pool.query(
-      `SELECT t.*, c.domain, c.url_pattern, c.title as config_title
-       FROM tools t
-       JOIN configs c ON t.config_id = c.id
-       WHERE t.config_id IN (${placeholders})
-       ORDER BY t.created_at`,
-      configIds
-    );
-    return res.rows;
+    const configIds = new Set(matchingConfigs.map(c => c.id));
+    return [...this._tools.values()]
+      .filter(t => configIds.has(t.config_id))
+      .map(t => {
+        const config = matchingConfigs.find(c => c.id === t.config_id);
+        return { ...t, domain: config.domain, url_pattern: config.url_pattern, config_title: config.title };
+      })
+      .sort((a, b) => a.created_at.localeCompare(b.created_at));
   }
 
   async findToolByNameForDomain(domain, toolName) {
-    const res = await this._pool.query(
-      `SELECT t.*, c.domain, c.url_pattern
-       FROM tools t
-       JOIN configs c ON t.config_id = c.id
-       WHERE c.domain = $1 AND t.name = $2
-       LIMIT 1`,
-      [domain, toolName]
+    const configs = await this.getConfigsForDomain(domain);
+    const configIds = new Set(configs.map(c => c.id));
+    const tool = [...this._tools.values()].find(
+      t => configIds.has(t.config_id) && t.name === toolName
     );
-    return res.rows[0] || null;
+    if (!tool) return null;
+    const config = configs.find(c => c.id === tool.config_id);
+    return { ...tool, domain: config.domain, url_pattern: config.url_pattern };
+  }
+
+  async findToolByName(toolName) {
+    const tool = [...this._tools.values()].find(t => t.name === toolName);
+    if (!tool) return null;
+    const config = this._configs.get(tool.config_id);
+    if (!config) return tool;
+    return { ...tool, domain: config.domain, url_pattern: config.url_pattern };
   }
 
   async searchConfigsByQuery(query, limit = 1) {
     const embedding = await this._embed(query);
-    const embeddingStr = '[' + embedding.join(',') + ']';
 
-    const res = await this._pool.query(
-      `SELECT c.id, c.domain, c.url_pattern, c.title, c.description, c.tags
-       FROM configs c
-       ORDER BY c.embedding <=> $1::vector
-       LIMIT $2`,
-      [embeddingStr, limit]
-    );
+    const scored = [...this._configs.values()].map(config => {
+      const sim = cosineSimilarity(embedding, config.embedding);
+      return { config, sim };
+    });
+    scored.sort((a, b) => b.sim - a.sim);
 
-    const configs = [];
-    for (const row of res.rows) {
-      const toolsRes = await this._pool.query(
-        'SELECT name, description FROM tools WHERE config_id = $1 ORDER BY created_at',
-        [row.id]
-      );
-      configs.push({
-        ...row,
-        tools: toolsRes.rows,
+    const results = [];
+    for (const { config } of scored.slice(0, limit)) {
+      const tools = await this.getToolsForConfig(config.id);
+      results.push({
+        id: config.id,
+        domain: config.domain,
+        url_pattern: config.url_pattern,
+        title: config.title,
+        description: config.description,
+        tags: config.tags,
+        tools: tools.map(t => ({ name: t.name, description: t.description })),
       });
     }
-    return configs;
+    return results;
   }
 
-  async findToolByName(toolName) {
-    const res = await this._pool.query(
-      `SELECT t.*, c.domain, c.url_pattern
-       FROM tools t
-       JOIN configs c ON t.config_id = c.id
-       WHERE t.name = $1
-       LIMIT 1`,
-      [toolName]
-    );
-    return res.rows[0] || null;
-  }
-
-  async close() {
-    await this._pool.end();
-  }
+  async close() {}
 }
 
-function matchUrlPattern(pattern, pathname) {
-  if (pattern === '/*' || pattern === '*') return true;
-  const regexStr = '^' + pattern
-    .replace(/[.+?^${}()|[\]\\]/g, '\\$&')
-    .replace(/\*/g, '.*')
-    + '$';
-  try {
-    return new RegExp(regexStr).test(pathname);
-  } catch {
-    return false;
+function cosineSimilarity(a, b) {
+  let dot = 0, normA = 0, normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
   }
-}
-
-function extractDomain(url) {
-  try {
-    const parsed = new URL(url);
-    return parsed.hostname.replace(/^www\./, '');
-  } catch {
-    return null;
-  }
+  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
 module.exports = {

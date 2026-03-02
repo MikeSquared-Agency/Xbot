@@ -4,52 +4,58 @@ const fs = require('fs');
 const path = require('path');
 
 class ToolIndex {
-  constructor({ dataDir }) {
-    this._dataDir = dataDir;
-    this._indexPath = path.join(dataDir, 'tool-index.json');
-    this._data = null;
+  constructor(dataDir = './data/cortex') {
+    this._filePath = path.join(dataDir, 'tool-index.json');
+    this._index = new Map();
+    this._load();
   }
 
   _load() {
-    if (this._data !== null) return;
     try {
-      const raw = fs.readFileSync(this._indexPath, 'utf-8');
-      this._data = JSON.parse(raw);
+      const raw = fs.readFileSync(this._filePath, 'utf8');
+      const obj = JSON.parse(raw);
+      this._index = new Map(Object.entries(obj));
     } catch {
-      this._data = {};
+      this._index = new Map();
     }
   }
 
-  _save() {
-    fs.mkdirSync(this._dataDir, { recursive: true });
-    fs.writeFileSync(this._indexPath, JSON.stringify(this._data, null, 2));
+  _persist() {
+    const obj = Object.fromEntries(this._index);
+    fs.mkdirSync(path.dirname(this._filePath), { recursive: true });
+    fs.writeFileSync(this._filePath, JSON.stringify(obj, null, 2), 'utf8');
   }
 
-  set(key, nodeId) {
-    this._load();
-    this._data[key] = nodeId;
-    this._save();
-  }
-
+  /** Get node ID for a tool or config. Returns string or null. */
   get(key) {
-    this._load();
-    return this._data[key] ?? null;
+    return this._index.get(key) ?? null;
   }
 
+  /** Set node ID for a tool or config. Persists to disk immediately. */
+  set(key, nodeId) {
+    this._index.set(key, nodeId);
+    this._persist();
+  }
+
+  /** Delete an entry. */
+  delete(key) {
+    this._index.delete(key);
+    this._persist();
+  }
+
+  /** Wipe everything (for tests). */
   clear() {
-    this._data = {};
-    try {
-      fs.unlinkSync(this._indexPath);
-    } catch {}
-  }
-
-  configKey(domain, pattern) {
-    return `config:${domain}:${pattern}`;
-  }
-
-  toolKey(configId, toolName) {
-    return `tool:${configId}:${toolName}`;
+    this._index.clear();
+    try { fs.unlinkSync(this._filePath); } catch {}
   }
 }
 
-module.exports = { ToolIndex };
+function configKey(domain, urlPattern) {
+  return `config:${domain}:${urlPattern}`;
+}
+
+function toolKey(domain, toolName) {
+  return `tool:${domain}:${toolName}`;
+}
+
+module.exports = { ToolIndex, configKey, toolKey };
