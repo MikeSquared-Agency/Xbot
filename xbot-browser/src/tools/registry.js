@@ -1,6 +1,6 @@
 'use strict';
 
-const { extractDomain } = require('../action-store');
+const { extractDomain } = require('../utils');
 
 class ToolRegistry {
   constructor(store) {

@@ -10,7 +10,7 @@ xbot-browser is an [MCP](https://modelcontextprotocol.io/) server built on [Play
 
 When you navigate to a site:
 
-1. **Known site**: Looks up the domain and URL pattern in its database. If stored tools exist (e.g. `x:get-list-feed`, `x:post-reply`), they're immediately available. The LLM calls them by name with parameters, and xbot translates them into Playwright actions.
+1. **Known site**: Looks up the domain and URL pattern in its in-memory store. If stored tools exist (e.g. `x:get-list-feed`, `x:post-reply`), they're immediately available. The LLM calls them by name with parameters, and xbot translates them into Playwright actions.
 
 2. **New site**: No stored tools exist yet, so xbot falls back to raw Playwright tools. As the LLM explores the page, xbot nudges it to save what it learns as reusable tools so the next visit is instant.
 
@@ -30,7 +30,8 @@ xbot/
 ├── xbot-browser/           # MCP server (Node.js)
 │   ├── src/
 │   │   ├── xbot-backend.js     # Main orchestrator
-│   │   ├── action-store.js      # DB + local embeddings
+│   │   ├── action-store.js      # In-memory store + local embeddings
+│   │   ├── utils.js               # Shared utilities (extractDomain, matchUrlPattern)
 │   │   ├── action-translator.js # Tool → Playwright code
 │   │   ├── action-tools.js      # MCP tool schemas
 │   │   ├── action-schema.js     # Validation schemas
@@ -43,13 +44,12 @@ xbot/
 │   │       └── anti-detection.js # Delay helpers
 │   └── scripts/
 │       └── train-x-tools.js     # X tool training script
-└── supabase/                # Database migrations
+└── supabase-archived/       # Archived database migrations (historical)
 ```
 
 ## Prerequisites
 
 - [Node.js](https://nodejs.org/) >= 18
-- A PostgreSQL database with the [pgvector](https://github.com/pgvector/pgvector) extension
 
 ## Setup
 
@@ -60,24 +60,13 @@ git clone https://github.com/DarlingtonDeveloper/Xbot.git
 cd Xbot
 ```
 
-### 2. Set up the database
-
-```bash
-psql $DATABASE_URL -f supabase/migrations/0001_init_schema.sql
-psql $DATABASE_URL -f supabase/migrations/0005_xbot_schema.sql
-```
-
-### 3. Configure environment
+### 2. Configure environment
 
 ```bash
 cp .env.example .env
 ```
 
-| Variable | Description |
-|----------|-------------|
-| `DATABASE_URL` | PostgreSQL connection string |
-
-### 4. Install xbot-browser
+### 3. Install xbot-browser
 
 ```bash
 cd xbot-browser
@@ -85,7 +74,7 @@ npm install
 npx playwright install
 ```
 
-### 5. Train X tools (optional)
+### 4. Train X tools (optional)
 
 ```bash
 npm run train:x
