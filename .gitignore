@@ -29,5 +29,8 @@ xbot-browser/tests/testserver/*.pem
 # Browser sessions
 sessions/
 
+# Cortex data
+data/cortex/
+
 # Supabase temp
 supabase/.temp/

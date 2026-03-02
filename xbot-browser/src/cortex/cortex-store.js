@@ -71,10 +71,10 @@ function extractDomain(url) {
 
 class CortexStore {
   constructor(opts = {}) {
-    this._httpBase = (opts.httpBase || process.env.CORTEX_HTTP_BASE || 'http://localhost:3100').replace(/\/$/, '');
+    this._httpBase = (opts.httpBase || process.env.CORTEX_HTTP_BASE || 'http://localhost:9091').replace(/\/$/, '');
     this._sourceAgent = opts.sourceAgent || process.env.CORTEX_SOURCE_AGENT || 'xbot';
-    this._timeoutMs = opts.timeoutMs || Number(process.env.CORTEX_TIMEOUT_MS) || 5000;
-    this._toolIndex = new ToolIndex();
+    this._timeoutMs = opts.timeoutMs || Number(process.env.CORTEX_TIMEOUT_MS) || 2000;
+    this._toolIndex = new ToolIndex(opts.toolIndexDir);
   }
 
   // ─── HTTP helpers ───
