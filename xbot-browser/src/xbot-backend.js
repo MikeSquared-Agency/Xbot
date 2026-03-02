@@ -404,6 +404,10 @@ ${toolList}
       // All fallbacks failed — increment failure count
       if (tool.id) {
         const newCount = await this._store.incrementFailureCount(tool.id);
+        // Decay importance on repeated failure
+        if (newCount >= 2) {
+          this._boostImportance(tool.id, -0.1);
+        }
         if (newCount >= 3) {
           result = appendTextToResult(result, `\n\n<relearn-nudge>This tool has failed ${newCount} times. Its selectors may be outdated. Use browser_snapshot to inspect the page and update the tool with add_update-tool.</relearn-nudge>`);
         }
@@ -413,8 +417,37 @@ ${toolList}
       await this._store.resetFailureCount(tool.id);
     }
 
+    // Fire-and-forget importance boost on success
+    if (!result.isError && tool.id) {
+      this._boostImportance(tool.id, 0.05);
+    }
+
     const header = `### Executed: ${tool.name}\n`;
     return prependTextToResult(result, header);
+  }
+
+  // ─── Importance feedback ───
+
+  /**
+   * Fire-and-forget importance adjustment via Cortex PATCH.
+   * Positive delta = boost, negative = decay. Clamps to [0.1, 1.0].
+   */
+  _boostImportance(nodeId, delta) {
+    const httpBase = process.env.CORTEX_HTTP || 'http://localhost:9091';
+    fetch(`${httpBase}/nodes/${nodeId}`, { signal: AbortSignal.timeout(2000) })
+      .then(res => res.ok ? res.json() : null)
+      .then(json => {
+        if (!json?.success) return;
+        const current = json.data.importance || 0.5;
+        const adjusted = Math.max(0.1, Math.min(1.0, current + delta));
+        return fetch(`${httpBase}/nodes/${nodeId}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ importance: adjusted }),
+          signal: AbortSignal.timeout(2000),
+        });
+      })
+      .catch(() => {}); // intentionally swallowed — fire-and-forget
   }
 
   // ─── xbot_memory (semantic search) ───
