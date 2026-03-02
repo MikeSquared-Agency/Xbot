@@ -146,6 +146,24 @@ class XbotBackend {
       } catch {}
     }
 
+    // Inject Cortex domain briefing if available
+    if (this._registry.currentDomain && this._registry.currentTools.length > 0) {
+      try {
+        const briefingUrl = `${this._store._httpBase || 'http://localhost:9091'}/briefing/xbot?compact=true`;
+        const res = await fetch(briefingUrl, { signal: AbortSignal.timeout(2000) }).catch(() => null);
+        if (res?.ok) {
+          const json = await res.json();
+          if (json.success && json.data?.rendered) {
+            const briefing = postProcessBriefing(json.data.rendered, 600);
+            if (briefing) {
+              const briefingBlock = `<domain-memory domain="${this._registry.currentDomain}">\n${briefing}\n</domain-memory>\n\n`;
+              result = prependTextToResult(result, briefingBlock);
+            }
+          }
+        }
+      } catch {}
+    }
+
     // Prepend available tools info
     const domain = this._registry.currentDomain;
     if (this._registry.currentTools.length > 0) {
@@ -765,6 +783,16 @@ function summarizeArgs(toolName, args) {
       return json.length > 100 ? json.slice(0, 97) + '...' : json;
     }
   }
+}
+
+function postProcessBriefing(raw, maxTokens) {
+  if (!raw) return '';
+  const charLimit = maxTokens * 4;
+  const stripped = raw.replace(/[#*`_~[\]]/g, '').trim();
+  if (stripped.length === 0) return '';
+  return stripped.length > charLimit
+    ? stripped.slice(0, charLimit) + '... [truncated]'
+    : stripped;
 }
 
 function extractFinalUrl(result) {
