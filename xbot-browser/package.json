@@ -13,6 +13,7 @@
   "license": "Apache-2.0",
   "scripts": {
     "test": "playwright test",
+    "test:cortex": "jest",
     "ctest": "playwright test --project=chrome",
     "train:x": "node scripts/train-x-tools.js"
   },
@@ -29,6 +30,7 @@
     "playwright-core": "1.59.0-alpha-1771104257000"
   },
   "devDependencies": {
+    "jest": "^29.7.0",
     "@modelcontextprotocol/sdk": "^1.25.2",
     "@playwright/test": "1.59.0-alpha-1771104257000",
     "@types/node": "^24.3.0"
