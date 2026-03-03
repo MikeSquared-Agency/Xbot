@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from echo.auth import get_client
+from echo.auth import get_client_async
 
 
 async def generate_brief(
@@ -50,7 +50,7 @@ Produce a brief with these fields:
 
 Keep it concise — 6 lines max. This will be injected into a reply generation prompt."""
 
-    client = get_client()
+    client = await get_client_async()
     message = await client.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=300,

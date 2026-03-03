@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 
-from echo.auth import get_client
+from echo.auth import get_client_async
 from echo.compose import GeneratedReply, Tweet
 from echo.compose.prompt import build_compose_prompt
 from echo.compose.strategies import get_strategy_weights, order_strategies_by_weight
@@ -88,7 +88,7 @@ async def call_compose_llm(
         winning_patterns=winning_patterns,
     )
 
-    client = get_client()
+    client = await get_client_async()
     message = await client.messages.create(
         model=COMPOSE_MODEL,
         max_tokens=2048,
