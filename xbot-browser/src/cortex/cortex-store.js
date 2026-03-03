@@ -67,6 +67,23 @@ function extractDomain(url) {
   }
 }
 
+/** Sanitize a string for use as a Cortex tag (alphanumeric + hyphens only). */
+function sanitizeTag(str) {
+  return str.replace(/[^a-z0-9-]/gi, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').toLowerCase();
+}
+
+/**
+ * Filter neighbors response to exclude the source node itself.
+ * Cortex /neighbors returns the queried node plus its neighbors.
+ */
+function filterNeighbors(neighbors, sourceId) {
+  if (!Array.isArray(neighbors)) return [];
+  return neighbors.filter(n => {
+    const node = n.node || n;
+    return node.id !== sourceId;
+  });
+}
+
 // ─── CortexStore ───
 
 class CortexStore {
@@ -178,7 +195,7 @@ class CortexStore {
       title: domain,
       body: JSON.stringify(bodyData),
       importance: 0.5,
-      tags: [domain, pattern],
+      tags: [sanitizeTag(domain)],
       source_agent: this._sourceAgent,
     });
 
@@ -196,7 +213,7 @@ class CortexStore {
 
   async getConfigsForDomain(domain) {
     const nodes = await this._get(
-      `/nodes?kind=domain&tag=${encodeURIComponent(domain)}&limit=50`,
+      `/nodes?kind=domain&tag=${encodeURIComponent(sanitizeTag(domain))}&limit=50`,
       [],
     );
     if (!Array.isArray(nodes)) return [];
@@ -280,7 +297,7 @@ class CortexStore {
       title: name,
       body: JSON.stringify(toolData),
       importance: 0.75,
-      tags: [domain, name],
+      tags: [sanitizeTag(domain), sanitizeTag(name)],
       source_agent: this._sourceAgent,
     });
 
@@ -329,11 +346,11 @@ class CortexStore {
     const configNode = await this._get(`/nodes/${configId}`);
     if (!configNode) return null;
 
-    const neighbors = await this._get(
+    const rawNeighbors = await this._get(
       `/nodes/${configId}/neighbors?depth=1&direction=outgoing`,
       [],
     );
-    if (!Array.isArray(neighbors)) return null;
+    const neighbors = filterNeighbors(rawNeighbors, configId);
 
     for (const neighbor of neighbors) {
       const node = neighbor.node || neighbor;
@@ -348,11 +365,11 @@ class CortexStore {
     const configNode = await this._get(`/nodes/${configId}`);
     if (!configNode) return [];
 
-    const neighbors = await this._get(
+    const rawNeighbors = await this._get(
       `/nodes/${configId}/neighbors?depth=1&direction=outgoing`,
       [],
     );
-    if (!Array.isArray(neighbors)) return [];
+    const neighbors = filterNeighbors(rawNeighbors, configId);
 
     return neighbors
       .map(n => n.node || n)
@@ -444,7 +461,7 @@ class CortexStore {
   async findToolsForUrl(domain, url) {
     // Get all domain nodes for this domain
     const domainNodes = await this._get(
-      `/nodes?kind=domain&tag=${encodeURIComponent(domain)}&limit=50`,
+      `/nodes?kind=domain&tag=${encodeURIComponent(sanitizeTag(domain))}&limit=50`,
       [],
     );
     if (!Array.isArray(domainNodes) || domainNodes.length === 0) return [];
@@ -475,11 +492,11 @@ class CortexStore {
     // Get tool neighbors for each matching config
     const tools = [];
     for (const config of matchingConfigs) {
-      const neighbors = await this._get(
+      const rawNeighbors = await this._get(
         `/nodes/${config.node.id}/neighbors?depth=1&direction=outgoing`,
         [],
       );
-      if (!Array.isArray(neighbors)) continue;
+      const neighbors = filterNeighbors(rawNeighbors, config.node.id);
 
       for (const neighbor of neighbors) {
         const node = neighbor.node || neighbor;
@@ -512,11 +529,11 @@ class CortexStore {
       const config = nodeToConfig(node);
 
       // Get tools for this config
-      const neighbors = await this._get(
+      const rawNeighbors = await this._get(
         `/nodes/${node.id}/neighbors?depth=1&direction=outgoing`,
         [],
       );
-      const toolNodes = (Array.isArray(neighbors) ? neighbors : [])
+      const toolNodes = filterNeighbors(rawNeighbors, node.id)
         .filter(n => (n.node || n).kind?.toLowerCase() === 'tool')
         .map(n => {
           const tn = n.node || n;
@@ -533,7 +550,7 @@ class CortexStore {
   async findToolByName(toolName) {
     // Search for tool nodes by name tag
     const results = await this._get(
-      `/nodes?kind=tool&tag=${encodeURIComponent(toolName)}&limit=1`,
+      `/nodes?kind=tool&tag=${encodeURIComponent(sanitizeTag(toolName))}&limit=1`,
       [],
     );
     if (!Array.isArray(results) || results.length === 0) return null;
