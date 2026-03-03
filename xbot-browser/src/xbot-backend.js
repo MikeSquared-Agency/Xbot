@@ -395,14 +395,25 @@ ${toolList}
     if (isWorkflow && !result.isError && result.content) {
       for (const item of result.content) {
         if (item.type !== 'text') continue;
-        try {
-          const parsed = JSON.parse(item.text);
-          if (parsed.downloadPath) {
-            const fileContent = fs.readFileSync(parsed.downloadPath, 'utf-8');
-            item.text = fileContent;
+        const text = item.text;
+
+        // Try extracting downloadPath from JSON embedded in the result text
+        const jsonMatch = text.match(/"downloadPath"\s*:\s*"([^"]+)"/);
+        if (jsonMatch) {
+          try {
+            item.text = fs.readFileSync(jsonMatch[1], 'utf-8');
             break;
-          }
-        } catch {}
+          } catch {}
+        }
+
+        // Try "Downloaded file ... to "path"" event format
+        const dlMatch = text.match(/Downloaded file .+ to "([^"]+)"/);
+        if (dlMatch) {
+          try {
+            item.text = fs.readFileSync(dlMatch[1], 'utf-8');
+            break;
+          } catch {}
+        }
       }
     }
 
