@@ -519,9 +519,13 @@ class EchoStore:
         results.sort(key=lambda r: r.get("posted_at", ""), reverse=True)
         return results[:limit]
 
-    async def get_reply_window(self, days: int = 7) -> list[dict]:
+    async def get_reply_window(self, days: int | None = 7) -> list[dict]:
         nodes = await self.cortex.get_nodes(kind="reply", limit=500)
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=days)
+            if days is not None
+            else None
+        )
         results = []
         for node in nodes:
             data = _parse_body(node)
@@ -532,11 +536,52 @@ class EchoStore:
                 try:
                     posted = datetime.fromisoformat(posted)
                 except (ValueError, TypeError):
+                    posted = _parse_analytics_date(posted)
+                    if posted is None:
+                        continue
+            if cutoff is not None:
+                # Normalise both to naive UTC for comparison
+                cmp_posted = posted.replace(tzinfo=None) if posted.tzinfo else posted
+                cmp_cutoff = cutoff.replace(tzinfo=None) if cutoff.tzinfo else cutoff
+                if cmp_posted < cmp_cutoff:
                     continue
-            if posted >= cutoff and data.get("impressions", 0) > 0:
+            if data.get("impressions", 0) > 0:
                 data["_node_id"] = _node_id(node)
                 results.append(data)
         results.sort(key=lambda r: r.get("posted_at", ""), reverse=True)
+        return results
+
+    async def get_post_window(self, days: int | None = None) -> list[dict]:
+        """Fetch post nodes (original posts, not replies) with impression data."""
+        nodes = await self.cortex.get_nodes(kind="post", limit=500)
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=days)
+            if days is not None
+            else None
+        )
+        results = []
+        for node in nodes:
+            tags = node.get("tags", [])
+            if "is-reply" in tags:
+                continue
+            data = _parse_body(node)
+            if data.get("impressions", 0) <= 0:
+                continue
+            posted = data.get("posted_at")
+            if isinstance(posted, str):
+                try:
+                    posted_dt = datetime.fromisoformat(posted)
+                except (ValueError, TypeError):
+                    posted_dt = _parse_analytics_date(posted)
+                if cutoff is not None and posted_dt:
+                    cmp_posted = posted_dt.replace(tzinfo=None) if posted_dt.tzinfo else posted_dt
+                    cmp_cutoff = cutoff.replace(tzinfo=None) if cutoff.tzinfo else cutoff
+                    if cmp_posted < cmp_cutoff:
+                        continue
+            data["_node_id"] = _node_id(node)
+            data["post_id"] = node.get("title", "")
+            results.append(data)
+        results.sort(key=lambda r: r.get("impressions", 0), reverse=True)
         return results
 
     async def get_today_replies(self) -> list[dict]:
@@ -872,6 +917,14 @@ def _extract_status(tags: list[str]) -> str:
         if tag.startswith("status-"):
             return tag[7:]
     return "unknown"
+
+
+def _parse_analytics_date(s: str) -> datetime | None:
+    """Parse X Analytics date format: 'Mon, Mar 2, 2026' → datetime."""
+    try:
+        return datetime.strptime(s.strip(), "%a, %b %d, %Y")
+    except (ValueError, TypeError):
+        return None
 
 
 def _parse_dt(val: Any) -> datetime | None:
