@@ -7,17 +7,16 @@ const { toMcpTool } = require(path.join(playwrightMcpDir, 'sdk', 'tool'));
 const { z } = require('playwright-core/lib/mcpBundle');
 const { CortexStore, extractDomain } = require('./cortex/cortex-store');
 const { ensureCortexRunning } = require('./cortex/cortex-process');
-const { translateAction } = require('./action-translator');
+const fs = require('fs');
+const { translateAction, translateWorkflow } = require('./action-translator');
 const { ToolRegistry } = require('./tools/registry');
 const { FallbackTracker } = require('./tools/fallback');
-const { handleCheckSession, handlePullAnalytics } = require('./tools/x-tools');
 const { saveSession } = require('./browser/session');
+const { seedIfNeeded } = require('./cortex/seed');
 const {
   xbotExecuteSchema,
   browserFallbackSchema,
   xbotMemorySearchSchema,
-  xCheckSessionSchema,
-  xPullAnalyticsSchema,
   addCreateConfigSchema,
   addToolSchema,
   addUpdateToolSchema,
@@ -43,6 +42,7 @@ class XbotBackend {
       configPath: './cortex.toml',
       autostart: process.env.CORTEX_AUTOSTART !== 'false',
     });
+    await seedIfNeeded(this._store, path.join(__dirname, '../seeds/tools.json'));
     await this._inner.initialize(clientInfo);
   }
 
@@ -78,8 +78,6 @@ class XbotBackend {
       browserFallbackSchema,
       xbotExecuteSchema,
       xbotMemorySearchSchema,
-      xCheckSessionSchema,
-      xPullAnalyticsSchema,
       addCreateConfigSchema,
       addToolSchema,
       addUpdateToolSchema,
@@ -99,10 +97,6 @@ class XbotBackend {
         return this._handleExecute(rawArguments, progress);
       case 'xbot_memory':
         return this._handleMemorySearch(rawArguments);
-      case 'x:check-session':
-        return handleCheckSession(this._inner, progress);
-      case 'x:pull-analytics':
-        return handlePullAnalytics(this._inner, rawArguments, progress);
       case 'add_create-config':
         return this._handleCreateConfig(rawArguments);
       case 'add_tool':
@@ -381,9 +375,12 @@ ${toolList}
     }
 
     // Translate to Playwright code
+    const isWorkflow = execution.type === 'workflow';
     let code;
     try {
-      code = translateAction({ execution, params }, resolvedArgs);
+      code = isWorkflow
+        ? translateWorkflow({ execution, params }, resolvedArgs)
+        : translateAction({ execution, params }, resolvedArgs);
     } catch (e) {
       return {
         content: [{ type: 'text', text: `### Error translating tool\n${String(e)}` }],
@@ -393,6 +390,21 @@ ${toolList}
 
     // Execute
     let result = await this._inner.callTool('browser_run_code', { code }, progress);
+
+    // Workflow download post-processing: read file from disk
+    if (isWorkflow && !result.isError && result.content) {
+      for (const item of result.content) {
+        if (item.type !== 'text') continue;
+        try {
+          const parsed = JSON.parse(item.text);
+          if (parsed.downloadPath) {
+            const fileContent = fs.readFileSync(parsed.downloadPath, 'utf-8');
+            item.text = fileContent;
+            break;
+          }
+        } catch {}
+      }
+    }
 
     // Selector resilience: detect failures and try fallback selectors
     const errText = result.content?.[0]?.text || '';

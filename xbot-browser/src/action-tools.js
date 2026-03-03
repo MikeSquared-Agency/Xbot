@@ -62,18 +62,6 @@ WRONG: { "searchText": {...} }                — no such parameter exists
   type: 'action',
 };
 
-// ─── X (Twitter) Tools ───
-
-const xCheckSessionSchema = {
-  name: 'x:check-session',
-  title: 'Check X session',
-  description: `Check if the current browser session is authenticated on X (Twitter).
-Navigates to x.com/home and detects whether the user is logged in or redirected to a login page.
-Returns { authenticated: boolean, url: string, title: string }.`,
-  inputSchema: z.object({}),
-  type: 'readOnly',
-};
-
 // ─── Contribution Tools ───
 
 const addCreateConfigSchema = {
@@ -198,22 +186,6 @@ const xbotMemorySearchSchema = {
   type: 'readOnly',
 };
 
-const xPullAnalyticsSchema = {
-  name: 'x:pull-analytics',
-  title: 'Pull X Analytics CSV',
-  description: `Navigate to analytics.x.com, trigger CSV export, and return the raw CSV text.
-The CSV contains per-tweet metrics: impressions, likes, retweets, replies, profile clicks, engagement rate.
-<usage-rules>
-- Requires an authenticated X session (use x:check-session first if needed).
-- The "days" parameter controls the date range (default 28 days).
-- Returns the full CSV text as a single text content block for downstream parsing.
-</usage-rules>`,
-  inputSchema: z.object({
-    days: z.number().optional().describe('Number of days of analytics to export (default 1)'),
-  }),
-  type: 'readOnly',
-};
-
 const addDeleteToolSchema = {
   name: 'add_delete-tool',
   title: 'Delete a tool',
@@ -229,8 +201,6 @@ module.exports = {
   xbotExecuteSchema,
   browserFallbackSchema,
   xbotMemorySearchSchema,
-  xCheckSessionSchema,
-  xPullAnalyticsSchema,
   addCreateConfigSchema,
   addToolSchema,
   addUpdateToolSchema,

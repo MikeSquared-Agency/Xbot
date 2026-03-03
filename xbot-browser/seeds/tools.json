@@ -1,0 +1,152 @@
+{
+  "version": 1,
+  "domains": [
+    {
+      "domain": "x.com",
+      "urlPattern": "/*",
+      "title": "x.com",
+      "description": "X (Twitter) — social media platform"
+    },
+    {
+      "domain": "accounts.google.com",
+      "urlPattern": "/*",
+      "title": "accounts.google.com",
+      "description": "Google account sign-in"
+    },
+    {
+      "domain": "claude.ai",
+      "urlPattern": "/*",
+      "title": "claude.ai",
+      "description": "Anthropic Claude AI assistant"
+    }
+  ],
+  "tools": [
+    {
+      "domain": "x.com",
+      "name": "x:check-session",
+      "description": "Check if the current browser session is authenticated on X (Twitter). Navigates to x.com/home and detects whether the user is logged in or redirected to a login page. Returns { authenticated, url, title }.",
+      "inputSchema": [],
+      "execution": {
+        "type": "workflow",
+        "steps": [
+          { "action": "navigate", "url": "https://x.com/home" },
+          {
+            "action": "checkUrl",
+            "patterns": ["/login", "/i/flow/login", "/account/access"],
+            "titlePatterns": ["log in"],
+            "resultField": "isLoginPage"
+          },
+          {
+            "action": "return",
+            "value": { "authenticated": "!isLoginPage", "url": "$url", "title": "$title" }
+          }
+        ]
+      }
+    },
+    {
+      "domain": "x.com",
+      "name": "x:pull-analytics",
+      "description": "Navigate to X Analytics content tab, trigger CSV export, and return the raw CSV text. The CSV contains per-post metrics: impressions, likes, retweets, replies, engagements. Requires an authenticated X session.",
+      "inputSchema": [
+        { "name": "days", "type": "number", "description": "Number of days of analytics to export", "required": false, "default": 1 }
+      ],
+      "execution": {
+        "type": "workflow",
+        "steps": [
+          {
+            "action": "navigate",
+            "urlTemplate": "https://x.com/i/account_analytics/content?type=all&sort=impressions&dir=desc&from={from}&to={to}",
+            "computeParams": {
+              "from": { "type": "dateOffset", "field": "days", "default": 1, "format": "YYYY-MM-DD" },
+              "to": { "type": "today", "format": "YYYY-MM-DD" }
+            }
+          },
+          { "action": "waitForLoadState", "state": "networkidle", "timeout": 15000 },
+          {
+            "action": "download",
+            "selector": "button:has(svg[data-icon=\"icon-incoming\"])",
+            "fallbackSelectors": [
+              "button:has(svg path[d^=\"M11.99 16\"])",
+              "[aria-label*=\"download\" i]",
+              "[aria-label*=\"export\" i]",
+              "[data-testid*=\"download\"]",
+              "[data-testid*=\"export\"]",
+              "button:has-text(\"Export\")",
+              "button:has-text(\"Download\")"
+            ],
+            "returnContent": true
+          }
+        ]
+      }
+    },
+    {
+      "domain": "accounts.google.com",
+      "name": "google-enter-email",
+      "description": "Enter an email address on the Google sign-in page and click Next",
+      "inputSchema": [
+        { "name": "email", "type": "string", "description": "Email address to enter", "required": true }
+      ],
+      "execution": {
+        "fields": [
+          { "selector": "input[type=\"email\"]", "param": "email" }
+        ],
+        "submit": { "selector": "#identifierNext button" },
+        "waitFor": "input[type=\"password\"], #identifierNext"
+      }
+    },
+    {
+      "domain": "accounts.google.com",
+      "name": "google-enter-password",
+      "description": "Enter a password on the Google sign-in page and click Next",
+      "inputSchema": [
+        { "name": "password", "type": "string", "description": "Password to enter", "required": true }
+      ],
+      "execution": {
+        "fields": [
+          { "selector": "input[type=\"password\"]", "param": "password" }
+        ],
+        "submit": { "selector": "#passwordNext button" }
+      }
+    },
+    {
+      "domain": "claude.ai",
+      "name": "claude-dismiss-cookies",
+      "description": "Dismiss the cookie consent banner on claude.ai",
+      "inputSchema": [],
+      "execution": {
+        "type": "workflow",
+        "steps": [
+          {
+            "action": "click",
+            "selector": "button:has-text(\"Dismiss\")",
+            "fallbackSelectors": [
+              "button:has-text(\"Accept\")",
+              "button:has-text(\"Got it\")",
+              "[data-testid=\"cookie-banner-dismiss\"]"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "domain": "claude.ai",
+      "name": "claude-click-google-login",
+      "description": "Click the 'Continue with Google' button on the claude.ai login page",
+      "inputSchema": [],
+      "execution": {
+        "type": "workflow",
+        "steps": [
+          {
+            "action": "click",
+            "selector": "button:has-text(\"Continue with Google\")",
+            "fallbackSelectors": [
+              "[data-testid=\"google-login\"]",
+              "a:has-text(\"Google\")",
+              "button:has-text(\"Google\")"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}
