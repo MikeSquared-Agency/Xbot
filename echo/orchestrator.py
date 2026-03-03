@@ -95,10 +95,11 @@ async def startup() -> Orchestrator:
     session_result = await xbot.call("x:check-session", {})
     if not session_result.authenticated:
         console.print("[bold yellow]⚠ X session expired. Browser opening for login...[/]")
-        await xbot.call("browser:open", {"url": "https://x.com/login"})
+        # x:check-session already navigated to x.com, opening the browser.
+        # Navigate to login page so the user can authenticate.
+        await xbot.call("browser_navigate", {"url": "https://x.com/i/flow/login"})
         console.print("[dim]Log in to X in the browser, then press Enter here...[/dim]")
         await asyncio.get_event_loop().run_in_executor(None, input)
-        await xbot.call("browser:save-session", {})
         console.print("[green]✓ Session saved[/]")
     else:
         console.print("[green]✓ X session active[/]")
@@ -108,9 +109,13 @@ async def startup() -> Orchestrator:
 
     profile = await voice.get_active_profile()
     if not profile:
-        console.print("[yellow]No voice profile found. Running bootstrap...[/]")
-        await voice.bootstrap_voice_profile()
-        console.print("[green]✓ Voice profile v1 created[/]")
+        try:
+            console.print("[yellow]No voice profile found. Running bootstrap...[/]")
+            await voice.bootstrap_voice_profile()
+            console.print("[green]✓ Voice profile v1 created[/]")
+        except Exception as exc:
+            console.print(f"[red]Voice bootstrap failed (non-fatal): {exc}[/]")
+            console.print("[dim]You can retry later with: python -m echo.voice.bootstrap[/]")
 
     # 6. Load model weights
     from echo import scorer
@@ -123,7 +128,7 @@ async def startup() -> Orchestrator:
     # 7. Build CLI (runs concurrently)
     from echo.cli import EchoCLI
 
-    cli = EchoCLI(store)
+    cli = EchoCLI(store, xbot=xbot)
 
     return Orchestrator(config, store, xbot, cli)
 
@@ -240,11 +245,10 @@ class Orchestrator:
                         "\n[bold red]⚠ X session expired! "
                         "Please re-authenticate in the browser.[/]\n"
                     )
-                    await self.xbot.call("browser:open", {"url": "https://x.com/login"})
+                    await self.xbot.call("browser_navigate", {"url": "https://x.com/i/flow/login"})
                     await asyncio.get_event_loop().run_in_executor(
                         None, input, "Press Enter after logging in..."
                     )
-                    await self.xbot.call("browser:save-session", {})
                     console.print("[green]✓ Session re-authenticated[/]")
             except Exception:
                 pass  # Non-critical, will catch on next check
@@ -252,6 +256,47 @@ class Orchestrator:
     # ------------------------------------------------------------------
     # Daily Evolve scheduler
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Analytics pull
+    # ------------------------------------------------------------------
+
+    async def pull_analytics(self) -> dict | None:
+        """Pull X Analytics CSV via xbot and import metrics into Cortex."""
+        from echo.analytics import import_csv_text
+
+        try:
+            result = await self.xbot.call("x:pull-analytics", {"days": 1})
+
+            # Extract CSV text from MCP response
+            csv_text = None
+            if hasattr(result, "content"):
+                for item in result.content:
+                    if getattr(item, "type", None) == "text":
+                        csv_text = item.text
+                        break
+            elif isinstance(result, dict) and result.get("content"):
+                for item in result["content"]:
+                    if item.get("type") == "text":
+                        csv_text = item.get("text")
+                        break
+
+            if not csv_text:
+                console.print("[yellow]⚠ No CSV data returned from x:pull-analytics[/]")
+                return None
+
+            stats = await import_csv_text(self.store, csv_text)
+            console.print(
+                f"[green]✓ Analytics imported: "
+                f"{stats['matched']} reply updates, "
+                f"{stats.get('stored', 0)} posts stored, "
+                f"{stats.get('skipped', 0)} unchanged, "
+                f"{stats['total']} total[/]"
+            )
+            return stats
+        except Exception as exc:
+            console.print(f"[red]Analytics pull error: {exc}[/]")
+            return None
 
     async def daily_evolve_scheduler(self) -> None:
         """Run Evolve engine once per day at the configured hour."""
@@ -267,6 +312,9 @@ class Orchestrator:
                 console.print("\n[cyan]Running daily Evolve cycle...[/]")
                 await evolve.run_daily()
                 console.print("[green]✓ Evolve cycle complete[/]\n")
+
+                # Pull fresh analytics after evolve
+                await self.pull_analytics()
             except Exception as exc:
                 console.print(f"[red]Evolve error: {exc}[/]")
 

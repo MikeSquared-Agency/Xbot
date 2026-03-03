@@ -565,6 +565,52 @@ class EchoStore:
         data["metrics_updated_at"] = _now_iso()
         await self.cortex.update_node(reply_node_id, body=data)
 
+    async def upsert_post_analytics(self, post_id: str, data: dict) -> str:
+        """Create or update a post analytics node.
+
+        Used by the CSV importer to store metrics for any post/reply
+        from the account, whether or not Echo generated it.
+        """
+        tag = f"pid-{post_id}"
+        existing = await self.cortex.get_nodes(kind="post", tag=tag, limit=1)
+
+        metrics_data = {k: v for k, v in data.items()}
+        metrics_data["post_id"] = post_id
+        metrics_data["metrics_updated_at"] = _now_iso()
+
+        if existing:
+            node_id = _node_id(existing[0])
+            old_data = _parse_body(existing[0])
+            old_data.update(metrics_data)
+            await self.cortex.update_node(node_id, body=old_data)
+            return node_id
+
+        tags = ["post", tag]
+        text = data.get("text", "")
+        # Tag as reply if it starts with @ (it's a reply to someone)
+        if text.startswith("@"):
+            tags.append("is-reply")
+        post_url = data.get("post_url", "")
+        if post_url:
+            tags.append("has-url")
+
+        node = await self.cortex.create_node(
+            kind="post",
+            title=post_id,
+            body=metrics_data,
+            tags=tags,
+        )
+        return _node_id(node) if node else ""
+
+    async def find_post_by_id(self, post_id: str) -> dict | None:
+        """Find a post analytics node by post ID."""
+        nodes = await self.cortex.get_nodes(kind="post", tag=f"pid-{post_id}", limit=1)
+        if nodes:
+            data = _parse_body(nodes[0])
+            data["_node_id"] = _node_id(nodes[0])
+            return data
+        return None
+
     async def find_reply_by_reply_id(self, reply_id: str) -> dict | None:
         nodes = await self.cortex.get_nodes(kind="reply", limit=500)
         for node in nodes:

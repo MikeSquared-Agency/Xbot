@@ -36,10 +36,12 @@ class EchoCLI:
         self,
         store,
         publisher: Optional[Publisher] = None,
+        xbot=None,
     ):
         self.console = Console()
         self.store = store
         self.publisher = publisher or Publisher()
+        self.xbot = xbot
         self.running = True
 
     async def run(self) -> None:
@@ -148,7 +150,11 @@ class EchoCLI:
             self.console.print("[cyan]Refreshing...[/]")
             return "next"
 
-        self.console.print("[red]Unknown command. Use 1-5, e<N>, s, q, status, history, digest.[/]")
+        if action.startswith("analytics"):
+            await self._handle_analytics(action)
+            return "continue"
+
+        self.console.print("[red]Unknown command. Use 1-5, e<N>, s, q, status, history, digest, analytics.[/]")
         return "continue"
 
     async def _handle_edit(self, action: str, candidate: Candidate) -> str:
@@ -181,3 +187,51 @@ class EchoCLI:
         await self.publisher.post(self.store, candidate, reply, was_edited=True)
         self.console.print("[green]✓ Posted edited reply[/]")
         return "next"
+
+    async def _handle_analytics(self, action: str) -> None:
+        """Pull X Analytics CSV and import metrics into Cortex."""
+        from echo.analytics import import_csv_text
+
+        if not self.xbot:
+            self.console.print("[red]Xbot not available — cannot pull analytics.[/]")
+            return
+
+        # Parse optional days: "analytics 7" or just "analytics"
+        parts = action.split()
+        days = 1
+        if len(parts) > 1:
+            try:
+                days = int(parts[1])
+            except ValueError:
+                self.console.print("[red]Usage: analytics [days][/]")
+                return
+
+        self.console.print(f"[cyan]Pulling analytics ({days} day{'s' if days != 1 else ''})...[/]")
+
+        try:
+            result = await self.xbot.call("x:pull-analytics", {"days": days})
+
+            # Extract CSV text from MCP response
+            csv_text = None
+            for item in result.content:
+                text = getattr(item, "text", None)
+                if text is None and isinstance(item, dict):
+                    text = item.get("text")
+                if text:
+                    csv_text = text
+                    break
+
+            if not csv_text:
+                self.console.print("[red]No CSV data returned from x:pull-analytics[/]")
+                return
+
+            stats = await import_csv_text(self.store, csv_text)
+            self.console.print(
+                f"[green]✓ Analytics imported: "
+                f"{stats['matched']} reply updates, "
+                f"{stats.get('stored', 0)} posts stored, "
+                f"{stats.get('skipped', 0)} unchanged, "
+                f"{stats['total']} total[/]"
+            )
+        except Exception as exc:
+            self.console.print(f"[red]Analytics pull failed: {exc}[/]")

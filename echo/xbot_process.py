@@ -1,128 +1,109 @@
 """Xbot MCP server subprocess management.
 
 Manages the xbot-browser MCP server as a child process, communicating
-via JSON-RPC 2.0 over stdio.
+via the official MCP SDK stdio transport.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
-import itertools
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, field
 from typing import Any
+
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
 
 
 @dataclass
 class XbotResult:
-    """Wrapper around a JSON-RPC response from the Xbot MCP server."""
+    """Wrapper around an MCP tool call result."""
 
-    raw: dict[str, Any]
+    content: list[Any] = field(default_factory=list)
+    is_error: bool = False
 
     @property
     def authenticated(self) -> bool:
-        content = self._content_text()
-        if isinstance(content, str):
+        text = self._content_text()
+        if isinstance(text, str):
             try:
-                parsed = json.loads(content)
+                parsed = json.loads(text)
                 return parsed.get("authenticated", False)
             except (json.JSONDecodeError, AttributeError):
                 pass
-        if isinstance(self.raw.get("result"), dict):
-            return self.raw["result"].get("authenticated", False)
         return False
 
     def _content_text(self) -> str | None:
-        result = self.raw.get("result", {})
-        if isinstance(result, dict):
-            for item in result.get("content", []):
-                if isinstance(item, dict) and item.get("type") == "text":
-                    return item["text"]
+        for item in self.content:
+            if hasattr(item, "text"):
+                return item.text
+            if isinstance(item, dict) and item.get("type") == "text":
+                return item["text"]
         return None
-
-    def __getattr__(self, name: str) -> Any:
-        result = self.raw.get("result", {})
-        if isinstance(result, dict) and name in result:
-            return result[name]
-        raise AttributeError(f"XbotResult has no attribute {name!r}")
 
 
 class XbotProcess:
-    """Manages the Xbot MCP server as a subprocess."""
+    """Manages the Xbot MCP server as a subprocess via the MCP SDK."""
 
-    def __init__(self, proc: asyncio.subprocess.Process) -> None:
-        self.proc = proc
-        self._id_counter = itertools.count(1)
-        self._lock = asyncio.Lock()
-
-    def next_id(self) -> int:
-        return next(self._id_counter)
+    def __init__(
+        self,
+        session: ClientSession,
+        cleanup_cm: Any = None,
+        session_cm: Any = None,
+    ) -> None:
+        self.session = session
+        self._cleanup_cm = cleanup_cm
+        self._session_cm = session_cm
 
     @staticmethod
-    async def start(xbot_path: str, browser: str = "chrome") -> XbotProcess:
-        """Launch the Xbot MCP server and wait for it to be ready."""
-        proc = await asyncio.create_subprocess_exec(
-            "node",
-            f"{xbot_path}/cli.js",
-            "--browser",
-            browser,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        instance = XbotProcess(proc)
-        await instance._wait_for_ready()
-        return instance
+    async def start(
+        xbot_path: str,
+        browser: str = "chrome",
+        session_file: str | None = None,
+    ) -> XbotProcess:
+        """Launch the Xbot MCP server and establish an MCP session."""
+        cli_path = os.path.join(os.path.abspath(xbot_path), "cli.js")
 
-    async def _wait_for_ready(self, timeout: float = 30.0) -> None:
-        """Wait for the MCP server to signal readiness on stderr."""
-        assert self.proc.stderr is not None
-        try:
-            async with asyncio.timeout(timeout):
-                while True:
-                    line = await self.proc.stderr.readline()
-                    if not line:
-                        break
-                    text = line.decode("utf-8", errors="replace").strip()
-                    if "listening" in text.lower() or "ready" in text.lower():
-                        return
-        except TimeoutError:
-            pass
-        # Even without an explicit ready signal, the server may be up.
+        args = [cli_path, "--browser", browser]
+        if session_file:
+            args.extend(["--session-file", session_file])
+
+        server_params = StdioServerParameters(
+            command="node",
+            args=args,
+            env={**os.environ},
+        )
+
+        # Enter the stdio_client context manager — keeps the subprocess alive
+        cleanup_cm = stdio_client(server_params)
+        read, write = await cleanup_cm.__aenter__()
+
+        # Enter the ClientSession context manager
+        session_cm = ClientSession(read, write)
+        session = await session_cm.__aenter__()
+
+        # MCP handshake
+        await session.initialize()
+
+        return XbotProcess(session, cleanup_cm=cleanup_cm, session_cm=session_cm)
 
     async def call(self, tool_name: str, params: dict[str, Any] | None = None) -> XbotResult:
-        """Send an MCP tool call via JSON-RPC over stdio."""
-        assert self.proc.stdin is not None
-        assert self.proc.stdout is not None
-
-        request = {
-            "jsonrpc": "2.0",
-            "id": self.next_id(),
-            "method": "tools/call",
-            "params": {
-                "name": tool_name,
-                "arguments": params or {},
-            },
-        }
-
-        payload = json.dumps(request) + "\n"
-
-        async with self._lock:
-            self.proc.stdin.write(payload.encode())
-            await self.proc.stdin.drain()
-            response_line = await self.proc.stdout.readline()
-
-        if not response_line:
-            return XbotResult({"error": {"code": -1, "message": "No response from Xbot"}})
-
-        return XbotResult(json.loads(response_line))
+        """Call an MCP tool by name with parameters."""
+        result = await self.session.call_tool(tool_name, params or {})
+        return XbotResult(
+            content=list(result.content) if result.content else [],
+            is_error=getattr(result, "isError", False),
+        )
 
     async def stop(self) -> None:
-        """Terminate the Xbot subprocess."""
-        if self.proc.returncode is None:
-            self.proc.terminate()
+        """Shut down the MCP session and subprocess."""
+        if self._session_cm:
             try:
-                await asyncio.wait_for(self.proc.wait(), timeout=5.0)
-            except TimeoutError:
-                self.proc.kill()
-                await self.proc.wait()
+                await self._session_cm.__aexit__(None, None, None)
+            except Exception:
+                pass
+        if self._cleanup_cm:
+            try:
+                await self._cleanup_cm.__aexit__(None, None, None)
+            except Exception:
+                pass

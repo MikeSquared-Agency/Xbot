@@ -10,13 +10,14 @@ const { ensureCortexRunning } = require('./cortex/cortex-process');
 const { translateAction } = require('./action-translator');
 const { ToolRegistry } = require('./tools/registry');
 const { FallbackTracker } = require('./tools/fallback');
-const { handleCheckSession } = require('./tools/x-tools');
+const { handleCheckSession, handlePullAnalytics } = require('./tools/x-tools');
 const { saveSession } = require('./browser/session');
 const {
   xbotExecuteSchema,
   browserFallbackSchema,
   xbotMemorySearchSchema,
   xCheckSessionSchema,
+  xPullAnalyticsSchema,
   addCreateConfigSchema,
   addToolSchema,
   addUpdateToolSchema,
@@ -78,6 +79,7 @@ class XbotBackend {
       xbotExecuteSchema,
       xbotMemorySearchSchema,
       xCheckSessionSchema,
+      xPullAnalyticsSchema,
       addCreateConfigSchema,
       addToolSchema,
       addUpdateToolSchema,
@@ -99,6 +101,8 @@ class XbotBackend {
         return this._handleMemorySearch(rawArguments);
       case 'x:check-session':
         return handleCheckSession(this._inner, progress);
+      case 'x:pull-analytics':
+        return handlePullAnalytics(this._inner, rawArguments, progress);
       case 'add_create-config':
         return this._handleCreateConfig(rawArguments);
       case 'add_tool':

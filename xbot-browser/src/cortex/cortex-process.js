@@ -28,7 +28,7 @@ async function ensureCortexRunning(config) {
 
   // Already running?
   if (await isHealthy(healthUrl)) {
-    console.info('[cortex] Already running');
+    console.error('[cortex] Already running');
     return;
   }
 
@@ -38,10 +38,10 @@ async function ensureCortexRunning(config) {
   const timeoutMs = modelCacheExists ? 10_000 : 45_000;
 
   if (!modelCacheExists) {
-    console.info('[cortex] First run — embedding model download expected (~150MB, up to 45s)');
+    console.error('[cortex] First run — embedding model download expected (~150MB, up to 45s)');
   }
 
-  console.info('[cortex] Starting...');
+  console.error('[cortex] Starting...');
 
   const args = ['serve'];
   if (config.dataDir) args.push('--data-dir', config.dataDir);
@@ -58,7 +58,7 @@ async function ensureCortexRunning(config) {
   });
 
   await waitForHealth(healthUrl, timeoutMs);
-  console.info('[cortex] Ready');
+  console.error('[cortex] Ready');
 }
 
 async function isHealthy(url) {
