@@ -1,17 +1,6 @@
 from __future__ import annotations
 
-import os
-
-import anthropic
-
-_client: anthropic.AsyncAnthropic | None = None
-
-
-def _get_client() -> anthropic.AsyncAnthropic:
-    global _client
-    if _client is None:
-        _client = anthropic.AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-    return _client
+from echo.auth import get_client
 
 
 async def generate_brief(
@@ -61,7 +50,7 @@ Produce a brief with these fields:
 
 Keep it concise — 6 lines max. This will be injected into a reply generation prompt."""
 
-    client = _get_client()
+    client = get_client()
     message = await client.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=300,

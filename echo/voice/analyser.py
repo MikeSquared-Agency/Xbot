@@ -1,12 +1,6 @@
 import json
-import os
 
-import anthropic
-from dotenv import load_dotenv
-
-load_dotenv()
-
-_client = anthropic.AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+from echo.auth import get_client
 
 VOICE_ANALYSIS_PROMPT = """You are analysing a person's Twitter/X writing style to create a voice profile.
 This profile will be used to generate replies that sound authentically like them.
@@ -66,7 +60,7 @@ async def analyse_voice(all_tweets: list[dict], top_tweets: list[dict]) -> dict:
 
     prompt = VOICE_ANALYSIS_PROMPT.format(all_text=all_text, top_text=top_text)
 
-    response = await _client.messages.create(
+    response = await get_client().messages.create(
         model="claude-opus-4-20250514",
         max_tokens=4096,
         messages=[{"role": "user", "content": prompt}],

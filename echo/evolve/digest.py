@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import json
 
-import anthropic
-
+from echo.auth import get_client
 from echo.evolve.analyser import AnalysisResult
 from echo.evolve.collector import ReplyRecord
 
@@ -71,7 +70,7 @@ async def generate_digest(analysis: AnalysisResult) -> dict:
         poor_performers_formatted=_format_replies(analysis.poor_performers),
     )
 
-    client = anthropic.AsyncAnthropic()
+    client = get_client()
     message = await client.messages.create(
         model=DIGEST_MODEL,
         max_tokens=1024,
