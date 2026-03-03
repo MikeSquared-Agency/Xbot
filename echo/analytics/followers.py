@@ -8,34 +8,20 @@ from __future__ import annotations
 
 from datetime import date
 
-import asyncpg
 from rich.console import Console
 
 console = Console()
 
-UPSERT_SNAPSHOT = """
-    INSERT INTO echo.follower_snapshots (date, follower_count, delta)
-    VALUES ($1, $2, $3)
-    ON CONFLICT (date) DO UPDATE SET
-        follower_count = EXCLUDED.follower_count,
-        delta = EXCLUDED.delta
-"""
-
-YESTERDAY_COUNT = """
-    SELECT follower_count FROM echo.follower_snapshots
-    WHERE date = CURRENT_DATE - 1
-"""
-
 
 async def snapshot_follower_count(
-    conn: asyncpg.Connection,
+    store,
     xbot_call,
     handle: str,
 ) -> dict:
     """Scrape and store today's follower count.
 
     Args:
-        conn: Active asyncpg connection.
+        store: EchoStore instance.
         xbot_call: Async callable matching ``xbot.call(tool_name, args)``.
         handle: The X profile handle to look up.
 
@@ -49,12 +35,41 @@ async def snapshot_follower_count(
 
     follower_count = profile.get("followers", 0)
 
-    yesterday = await conn.fetchrow(YESTERDAY_COUNT)
-    previous = yesterday["follower_count"] if yesterday else follower_count
-    delta = follower_count - previous
+    # For delta, we'd need to look at previous snapshot.
+    # For now, store as a Cortex node and compute delta from previous.
+    today = date.today().isoformat()
+    previous_count = follower_count  # default if no previous
 
-    today = date.today()
-    await conn.execute(UPSERT_SNAPSHOT, today, follower_count, delta)
+    # Try to find yesterday's snapshot
+    nodes = await store.cortex.get_nodes(kind="follower_snapshot", limit=10)
+    yesterday = (date.today().toordinal() - 1)
+    for node in nodes:
+        from echo.db.store import _parse_body
+        data = _parse_body(node)
+        if data.get("date") == date.fromordinal(yesterday).isoformat():
+            previous_count = data.get("follower_count", follower_count)
+            break
+
+    delta = follower_count - previous_count
+
+    # Upsert today's snapshot
+    found = False
+    for node in nodes:
+        if node.get("title") == today:
+            await store.cortex.update_node(
+                node["id"],
+                body={"date": today, "follower_count": follower_count, "delta": delta},
+            )
+            found = True
+            break
+
+    if not found:
+        await store.cortex.create_node(
+            kind="follower_snapshot",
+            title=today,
+            body={"date": today, "follower_count": follower_count, "delta": delta},
+            tags=["follower-snapshot"],
+        )
 
     console.print(
         f"[dim]Followers: {follower_count:,} (Δ {delta:+,})[/]"

@@ -14,8 +14,8 @@ load_dotenv()
 
 X_PROFILE_HANDLE = os.environ["X_PROFILE_HANDLE"]
 
-AMI_BROWSER_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "..", "ami-browser", "cli.js"
+XBOT_BROWSER_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "..", "xbot-browser", "cli.js"
 )
 
 
@@ -66,7 +66,7 @@ async def bootstrap_voice_profile() -> dict:
 
     server_params = StdioServerParameters(
         command="node",
-        args=[os.path.abspath(AMI_BROWSER_PATH)],
+        args=[os.path.abspath(XBOT_BROWSER_PATH)],
         env={**os.environ},
     )
 

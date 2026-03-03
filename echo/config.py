@@ -10,11 +10,8 @@ _env_path = Path(__file__).resolve().parent.parent / ".env"
 load_dotenv(_env_path)
 
 
-def get_database_url() -> str:
-    url = os.environ.get("DATABASE_URL")
-    if not url:
-        raise RuntimeError("DATABASE_URL environment variable is required")
-    return url
+def get_cortex_url() -> str:
+    return os.environ.get("CORTEX_HTTP", "http://localhost:9091")
 
 
 def get_watchlist_url() -> str:

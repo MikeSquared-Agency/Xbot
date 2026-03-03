@@ -5,113 +5,68 @@ from __future__ import annotations
 import json
 import os
 
-import asyncpg
-
 from echo.auth import get_client
 from echo.compose import GeneratedReply, Tweet
 from echo.compose.prompt import build_compose_prompt
 from echo.compose.strategies import get_strategy_weights, order_strategies_by_weight
 from echo.compose.validation import validate_replies
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "")
 COMPOSE_MODEL = os.environ.get("COMPOSE_MODEL", "claude-opus-4-20250514")
 
 
-async def get_tweet(db_url: str, tweet_id: str) -> Tweet:
-    """Load a tweet record from the database."""
-    conn = await asyncpg.connect(db_url)
-    try:
-        row = await conn.fetchrow(
-            "SELECT tweet_id, author_handle, content, virality_score "
-            "FROM echo.tweets WHERE tweet_id = $1",
-            tweet_id,
-        )
-        if not row:
-            raise ValueError(f"Tweet {tweet_id} not found")
-        return Tweet(
-            tweet_id=row["tweet_id"],
-            author_handle=row["author_handle"],
-            content=row["content"],
-            score=row["virality_score"],
-        )
-    finally:
-        await conn.close()
+async def get_tweet(tweet_id: str) -> Tweet:
+    """Load a tweet record from Cortex."""
+    from echo.db.store import get_global_store
+
+    store = get_global_store()
+    data = await store.get_tweet(tweet_id)
+    if not data:
+        raise ValueError(f"Tweet {tweet_id} not found")
+    return Tweet(
+        tweet_id=data.get("tweet_id", tweet_id),
+        author_handle=data.get("author_handle", ""),
+        content=data.get("content", ""),
+        score=data.get("virality_score"),
+    )
 
 
-async def get_author_brief(db_url: str, author_handle: str) -> str:
-    """Load cached author enrichment brief from echo.authors.
+async def get_author_brief(author_handle: str) -> str:
+    """Load cached author enrichment brief from Cortex."""
+    from echo.db.store import get_global_store
 
-    In production this calls the Context Agent (SPEC-05) to enrich.
-    Here we check the cache first, and fall back to a placeholder.
-    """
-    conn = await asyncpg.connect(db_url)
-    try:
-        row = await conn.fetchrow(
-            "SELECT enrichment_brief FROM echo.authors WHERE handle = $1",
-            author_handle,
-        )
-        if row and row["enrichment_brief"]:
-            return row["enrichment_brief"]
-        return f"@{author_handle} (no enrichment data available)"
-    finally:
-        await conn.close()
+    store = get_global_store()
+    brief = await store.get_author_brief(author_handle)
+    if brief:
+        return brief
+    return f"@{author_handle} (no enrichment data available)"
 
 
-async def get_active_voice_profile(db_url: str) -> dict:
+async def get_active_voice_profile() -> dict:
     """Load the currently active voice profile."""
-    conn = await asyncpg.connect(db_url)
-    try:
-        row = await conn.fetchrow(
-            "SELECT profile_json FROM echo.voice_profiles WHERE is_active = true LIMIT 1"
-        )
-        if not row:
-            return {"name": "default", "style": "concise, technical, opinionated"}
-        return row["profile_json"]
-    finally:
-        await conn.close()
+    from echo.db.store import get_global_store
+
+    store = get_global_store()
+    profile = await store.get_active_voice_profile()
+    if not profile:
+        return {"name": "default", "style": "concise, technical, opinionated"}
+    return profile
 
 
-async def get_winning_patterns(db_url: str) -> dict | None:
+async def get_winning_patterns() -> dict | None:
     """Load the latest winning patterns from the Evolve engine."""
-    conn = await asyncpg.connect(db_url)
-    try:
-        row = await conn.fetchrow(
-            """
-            SELECT digest_json->'winning_patterns' AS patterns
-            FROM echo.daily_digests
-            WHERE digest_json->'winning_patterns' IS NOT NULL
-            ORDER BY date DESC LIMIT 1
-            """
-        )
-        if row and row["patterns"]:
-            val = row["patterns"]
-            if isinstance(val, str):
-                return json.loads(val)
-            return val
-        return None
-    finally:
-        await conn.close()
+    from echo.db.store import get_global_store
+
+    store = get_global_store()
+    return await store.get_winning_patterns()
 
 
-async def get_recent_own_tweets(db_url: str, limit: int = 10) -> list[str]:
-    """Load recent tweets by the user for voice consistency.
+async def get_recent_own_tweets(limit: int = 10) -> list[str]:
+    """Load recent replies for voice consistency."""
+    from echo.db.store import get_global_store
 
-    Uses replied tweets (from echo.replies) as a proxy for the user's own voice.
-    Falls back to an empty list if none exist.
-    """
-    conn = await asyncpg.connect(db_url)
-    try:
-        rows = await conn.fetch(
-            """
-            SELECT reply_text FROM echo.replies
-            ORDER BY posted_at DESC NULLS LAST
-            LIMIT $1
-            """,
-            limit,
-        )
-        return [row["reply_text"] for row in rows]
-    finally:
-        await conn.close()
+    store = get_global_store()
+    replies = await store.get_recent_replies(limit)
+    return [r.get("reply_text", "") for r in replies if r.get("reply_text")]
 
 
 async def call_compose_llm(
@@ -159,49 +114,39 @@ async def call_compose_llm(
     ]
 
 
-async def store_replies(
-    db_url: str, tweet_id: str, replies: list[GeneratedReply]
-) -> None:
-    """Persist generated replies to echo.replies."""
-    conn = await asyncpg.connect(db_url)
-    try:
-        await conn.executemany(
-            """
-            INSERT INTO echo.replies (tweet_id, reply_text, strategy, original_text)
-            VALUES ($1, $2, $3, $4)
-            """,
-            [(tweet_id, r.text, r.strategy, None) for r in replies],
-        )
-    finally:
-        await conn.close()
+async def store_replies(tweet_id: str, replies: list[GeneratedReply]) -> None:
+    """Persist generated replies to Cortex."""
+    from echo.db.store import get_global_store
+
+    store = get_global_store()
+    await store.insert_replies_batch(
+        tweet_id,
+        [{"reply_text": r.text, "strategy": r.strategy} for r in replies],
+    )
 
 
-async def generate_replies(
-    tweet_id: str, db_url: str | None = None
-) -> list[GeneratedReply]:
+async def generate_replies(tweet_id: str) -> list[GeneratedReply]:
     """Generate 5 strategy-diverse replies for a candidate tweet.
 
     This is the main entry point for the Compose Agent.
     """
-    url = db_url or DATABASE_URL
-
     # 1. Load tweet
-    tweet = await get_tweet(url, tweet_id)
+    tweet = await get_tweet(tweet_id)
 
     # 2. Enrich author (cache-first)
-    brief = await get_author_brief(url, tweet.author_handle)
+    brief = await get_author_brief(tweet.author_handle)
 
     # 3. Load active voice profile
-    profile = await get_active_voice_profile(url)
+    profile = await get_active_voice_profile()
 
     # 4. Load recent winning patterns (from Evolve)
-    patterns = await get_winning_patterns(url)
+    patterns = await get_winning_patterns()
 
     # 5. Load recent own tweets for voice consistency
-    recent_own = await get_recent_own_tweets(url)
+    recent_own = await get_recent_own_tweets()
 
     # 6. Load strategy weights and determine ordering
-    weights = await get_strategy_weights(url)
+    weights = await get_strategy_weights()
     strategy_order = order_strategies_by_weight(weights)
 
     # 7. Generate via Claude
@@ -213,6 +158,6 @@ async def generate_replies(
     replies = validate_replies(replies)
 
     # 9. Persist
-    await store_replies(url, tweet_id, replies)
+    await store_replies(tweet_id, replies)
 
     return replies

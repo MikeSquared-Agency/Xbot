@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import asyncpg
-
 
 @dataclass(frozen=True)
 class Strategy:
@@ -51,25 +49,21 @@ STRATEGIES: dict[str, Strategy] = {
 DEFAULT_WEIGHTS: dict[str, float] = {name: 0.20 for name in STRATEGIES}
 
 
-async def get_strategy_weights(db_url: str) -> dict[str, float]:
+async def get_strategy_weights() -> dict[str, float]:
     """Get current strategy win rates for ordering.
 
     Falls back to equal weights if no scores exist yet.
     """
-    conn = await asyncpg.connect(db_url)
     try:
-        rows = await conn.fetch(
-            """
-            SELECT strategy, rolling_7d_win_rate
-            FROM echo.strategy_scores
-            WHERE date = (SELECT MAX(date) FROM echo.strategy_scores)
-            """
-        )
-        if not rows:
-            return dict(DEFAULT_WEIGHTS)
-        return {row["strategy"]: row["rolling_7d_win_rate"] for row in rows}
-    finally:
-        await conn.close()
+        from echo.db.store import get_global_store
+
+        store = get_global_store()
+        scores = await store.get_latest_strategy_scores()
+        if scores:
+            return scores
+    except Exception:
+        pass
+    return dict(DEFAULT_WEIGHTS)
 
 
 def order_strategies_by_weight(weights: dict[str, float]) -> list[str]:

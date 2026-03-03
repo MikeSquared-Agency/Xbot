@@ -2,25 +2,16 @@
 
 from __future__ import annotations
 
-import asyncpg
-
 from echo.evolve.analyser import AnalysisResult
 
 
-async def get_thirty_day_avg(conn: asyncpg.Connection) -> float:
+async def get_thirty_day_avg(store) -> float:
     """Fetch 30-day rolling average engagement score from daily digests."""
-    row = await conn.fetchrow(
-        """
-        SELECT AVG(avg_engagement_score) AS avg_score
-        FROM echo.daily_digests
-        WHERE date >= CURRENT_DATE - INTERVAL '30 days'
-        """
-    )
-    return float(row["avg_score"]) if row and row["avg_score"] else 0.0
+    return await store.get_thirty_day_avg_score()
 
 
 async def maybe_evolve_voice(
-    conn: asyncpg.Connection,
+    store,
     analysis: AnalysisResult,
     thirty_day_avg: float,
 ) -> bool:

@@ -1,11 +1,10 @@
-import json
 from datetime import datetime, timezone
 
 from echo.scorer.author import score_author
 from echo.scorer.content import score_content
 from echo.scorer.momentum import score_momentum
 from echo.scorer.recency import recency_decay
-from echo.scorer.weights import get_active_weights, get_db_pool
+from echo.scorer.weights import get_active_weights
 
 
 def get_tier(score: float) -> str:
@@ -20,47 +19,6 @@ def get_tier(score: float) -> str:
         return "discard"
 
 
-async def _fetch_queued_tweets(pool) -> list[dict]:
-    """Fetch all queued tweets with their metric snapshots."""
-    rows = await pool.fetch("""
-        SELECT t.*,
-               COALESCE(
-                   json_agg(
-                       json_build_object(
-                           'likes', tm.likes,
-                           'retweets', tm.retweets,
-                           'replies', tm.replies,
-                           'bookmarks', tm.bookmarks,
-                           'views', tm.views,
-                           'scraped_at', tm.scraped_at
-                       ) ORDER BY tm.scraped_at
-                   ) FILTER (WHERE tm.id IS NOT NULL),
-                   '[]'::json
-               ) as metric_snapshots
-        FROM echo.tweets t
-        LEFT JOIN echo.tweet_metrics tm ON t.tweet_id = tm.tweet_id
-        WHERE t.status = 'queued'
-        GROUP BY t.id
-    """)
-    results = []
-    for row in rows:
-        tweet = dict(row)
-        snapshots = tweet.pop("metric_snapshots", [])
-        if isinstance(snapshots, str):
-            snapshots = json.loads(snapshots)
-        tweet["_metric_snapshots"] = snapshots
-        results.append(tweet)
-    return results
-
-
-async def _fetch_author(pool, handle: str) -> dict | None:
-    """Fetch cached author profile."""
-    row = await pool.fetchrow(
-        "SELECT * FROM echo.authors WHERE handle = $1", handle
-    )
-    return dict(row) if row else None
-
-
 async def score_single_tweet(
     tweet: dict,
     metric_snapshots: list[dict],
@@ -68,11 +26,7 @@ async def score_single_tweet(
     weights: dict,
     niche_embedding: list[float] | None = None,
 ) -> dict:
-    """Score a single tweet and return the score breakdown.
-
-    Returns dict with: virality_score, author_score, content_score,
-    momentum_score, recency_multiplier, tier
-    """
+    """Score a single tweet and return the score breakdown."""
     now = datetime.now(timezone.utc)
 
     author_s = score_author(tweet, author, weights)
@@ -117,9 +71,11 @@ async def score_tweets(niche_embedding: list[float] | None = None) -> int:
 
     Returns the number of tweets scored.
     """
-    pool = await get_db_pool()
+    from echo.db.store import get_global_store
+
+    store = get_global_store()
     weights = await get_active_weights()
-    tweets = await _fetch_queued_tweets(pool)
+    tweets = await store.get_queued_tweets_with_metrics()
 
     # Cache authors to avoid repeated lookups within a batch
     author_cache: dict[str, dict | None] = {}
@@ -128,7 +84,7 @@ async def score_tweets(niche_embedding: list[float] | None = None) -> int:
     for tweet in tweets:
         handle = tweet.get("author_handle", "")
         if handle not in author_cache:
-            author_cache[handle] = await _fetch_author(pool, handle)
+            author_cache[handle] = await store.get_author(handle)
 
         author = author_cache[handle]
         metric_snapshots = tweet.get("_metric_snapshots", [])
@@ -139,26 +95,10 @@ async def score_tweets(niche_embedding: list[float] | None = None) -> int:
 
         # Determine new status
         new_status = "expired" if result["tier"] == "discard" else tweet.get("status", "queued")
+        result["status"] = new_status
 
-        await pool.execute(
-            """
-            UPDATE echo.tweets
-            SET virality_score = $1,
-                author_score = $2,
-                content_score = $3,
-                momentum_score = $4,
-                recency_multiplier = $5,
-                status = $6
-            WHERE id = $7
-            """,
-            result["virality_score"],
-            result["author_score"],
-            result["content_score"],
-            result["momentum_score"],
-            result["recency_multiplier"],
-            new_status,
-            tweet["id"],
-        )
+        tweet_id = tweet.get("tweet_id", "")
+        await store.update_tweet_scores(tweet_id, result)
         scored += 1
 
     return scored

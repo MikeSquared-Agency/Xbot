@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +20,7 @@ from echo.xbot_process import XbotProcess
 
 console = Console()
 
-# Default local config path (fallback when Supabase config unavailable)
+# Default local config path (fallback when Cortex config unavailable)
 LOCAL_CONFIG_PATH = Path(__file__).parent.parent / "echo_config.json"
 
 
@@ -28,23 +28,13 @@ LOCAL_CONFIG_PATH = Path(__file__).parent.parent / "echo_config.json"
 # Config loading
 # ---------------------------------------------------------------------------
 
-async def load_config() -> dict[str, Any]:
-    """Load config from Supabase, falling back to local JSON."""
+async def load_config(store) -> dict[str, Any]:
+    """Load config from Cortex, falling back to local JSON."""
     try:
-        from echo.database import Database
-
-        db_url = os.environ.get("DATABASE_URL", "")
-        if db_url:
-            db = await Database.connect(db_url)
-            try:
-                rows = await db.query(
-                    "SELECT value FROM echo.config ORDER BY updated_at DESC LIMIT 1"
-                )
-                if rows:
-                    console.print("[green]✓ Config loaded from Supabase[/]")
-                    return json.loads(rows[0]["value"]) if isinstance(rows[0]["value"], str) else rows[0]["value"]
-            finally:
-                await db.close()
+        config = await store.get_config()
+        if config:
+            console.print("[green]✓ Config loaded from Cortex[/]")
+            return config
     except Exception:
         pass
 
@@ -52,6 +42,11 @@ async def load_config() -> dict[str, Any]:
     if LOCAL_CONFIG_PATH.exists():
         config = json.loads(LOCAL_CONFIG_PATH.read_text())
         console.print("[yellow]⚠ Config loaded from local file[/]")
+        # Persist to Cortex for next time
+        try:
+            await store.save_config(config)
+        except Exception:
+            pass
         return config
 
     console.print("[yellow]⚠ No config found — using defaults[/]")
@@ -60,11 +55,10 @@ async def load_config() -> dict[str, Any]:
 
 def _default_config() -> dict[str, Any]:
     return {
-        "database_url": os.environ.get("DATABASE_URL", ""),
-        "nats_url": os.environ.get("NATS_URL", "nats://localhost:4222"),
+        "cortex_url": os.environ.get("CORTEX_HTTP", "http://localhost:9091"),
         "xbot_path": os.environ.get(
             "XBOT_PATH",
-            str(Path(__file__).parent.parent / "ami-browser"),
+            str(Path(__file__).parent.parent / "xbot-browser"),
         ),
         "poll_interval": 600,
         "evolve_hour": 23,
@@ -82,17 +76,18 @@ def _default_config() -> dict[str, Any]:
 async def startup() -> Orchestrator:
     """Run once on launch. Returns a fully-initialized Orchestrator."""
 
-    # 1. Load config
-    config = await load_config()
+    # 1. Connect to Cortex
+    from echo.db.store import EchoStore, set_global_store
 
-    # 2. Connect to Supabase / Postgres
-    from echo.database import Database
+    store = await EchoStore.connect()
+    set_global_store(store)
+    console.print("[green]✓ Cortex connected[/]")
 
-    db = await Database.connect(config.get("database_url", os.environ.get("DATABASE_URL", "")))
-    console.print("[green]✓ Database connected[/]")
+    # 2. Load config
+    config = await load_config(store)
 
     # 3. Start Xbot MCP server (subprocess)
-    xbot_path = config.get("xbot_path", str(Path(__file__).parent.parent / "ami-browser"))
+    xbot_path = config.get("xbot_path", str(Path(__file__).parent.parent / "xbot-browser"))
     xbot = await XbotProcess.start(xbot_path)
     console.print("[green]✓ Xbot MCP server started[/]")
 
@@ -125,28 +120,12 @@ async def startup() -> Orchestrator:
         await scorer.seed_default_weights()
         console.print("[green]✓ Default scoring weights seeded[/]")
 
-    # 7. Connect to NATS (Hermes)
-    nats = await _connect_nats(config.get("nats_url", "nats://localhost:4222"))
-
-    # 8. Build CLI (runs concurrently)
+    # 7. Build CLI (runs concurrently)
     from echo.cli import EchoCLI
 
-    cli = EchoCLI(db, nats, None)  # composer passed as None; orchestrator sets it
+    cli = EchoCLI(store)
 
-    return Orchestrator(config, db, xbot, nats, cli)
-
-
-async def _connect_nats(url: str) -> Any:
-    """Connect to NATS. Returns the client or None if unavailable."""
-    try:
-        import nats as nats_lib
-
-        nc = await nats_lib.connect(url)
-        console.print("[green]✓ NATS connected[/]")
-        return nc
-    except Exception as exc:
-        console.print(f"[yellow]⚠ NATS unavailable ({exc}) — running without messaging[/]")
-        return None
+    return Orchestrator(config, store, xbot, cli)
 
 
 # ---------------------------------------------------------------------------
@@ -172,15 +151,13 @@ class Orchestrator:
     def __init__(
         self,
         config: dict[str, Any],
-        db: Any,
+        store: Any,
         xbot: XbotProcess,
-        nats: Any,
         cli: Any,
     ) -> None:
         self.config = config
-        self.db = db
+        self.store = store
         self.xbot = xbot
-        self.nats = nats
         self.cli = cli
         self.poll_interval: int = config.get("poll_interval", 600)
 
@@ -213,14 +190,9 @@ class Orchestrator:
 
     async def run_poll_cycle(self) -> None:
         """Single poll cycle."""
-        from echo import scout, scorer, context as context_agent, compose
+        from echo import scorer, context as context_agent, compose
 
-        # 1. Scout — discover new tweets
-        new_count = await scout.poll_cycle()
-        if new_count:
-            console.print(f"[cyan]Scout found {new_count} new tweets[/]")
-
-        # 2. Score — score all queued tweets
+        # 1. Score — score all queued tweets
         await scorer.score_tweets()
 
         # 3. Expire stale tweets
@@ -230,33 +202,18 @@ class Orchestrator:
         threshold = self.config.get("virality_threshold", 30)
         limit = self.config.get("max_candidates_per_cycle", 5)
 
-        top_candidates = await self.db.query(
-            """
-            SELECT * FROM echo.tweets
-            WHERE status = 'queued'
-              AND virality_score >= $1
-              AND virality_score IS NOT NULL
-            ORDER BY virality_score DESC
-            LIMIT $2
-            """,
-            threshold,
-            limit,
-        )
+        top_candidates = await self.store.get_top_candidates(threshold, limit)
 
         for candidate in top_candidates:
-            tweet_id = candidate["tweet_id"] if isinstance(candidate, dict) else candidate.tweet_id
+            tweet_id = candidate.get("tweet_id", "")
 
             # Skip if already has generated replies
-            existing = await self.db.query(
-                "SELECT COUNT(*) AS count FROM echo.replies WHERE tweet_id = $1",
-                tweet_id,
-            )
-            count = existing[0]["count"] if existing else 0
+            count = await self.store.count_replies_for_tweet(tweet_id)
             if count > 0:
                 continue
 
             # Context enrich
-            author = candidate["author_handle"] if isinstance(candidate, dict) else candidate.author_handle
+            author = candidate.get("author_handle", "")
             await context_agent.enrich_author(author)
 
             # Compose replies
@@ -265,14 +222,7 @@ class Orchestrator:
     async def expire_stale_tweets(self) -> None:
         """Mark tweets older than the configured expiry window as expired."""
         hours = self.config.get("tweet_expiry_hours", 4)
-        await self.db.execute(
-            f"""
-            UPDATE echo.tweets
-            SET status = 'expired'
-            WHERE status = 'queued'
-              AND tweet_created_at < NOW() - INTERVAL '{hours} hours'
-            """
-        )
+        await self.store.expire_stale_tweets(hours)
 
     # ------------------------------------------------------------------
     # Session health
@@ -327,25 +277,14 @@ class Orchestrator:
     async def cleanup(self) -> None:
         """Clean shutdown: revert presented tweets, stop subprocesses."""
         try:
-            await self.db.execute(
-                """
-                UPDATE echo.tweets SET status = 'queued'
-                WHERE status = 'presented'
-                """
-            )
+            await self.store.revert_presented_tweets()
         except Exception:
             pass
 
         await self.xbot.stop()
 
-        if self.nats is not None:
-            try:
-                await self.nats.close()
-            except Exception:
-                pass
-
         try:
-            await self.db.close()
+            await self.store.close()
         except Exception:
             pass
 

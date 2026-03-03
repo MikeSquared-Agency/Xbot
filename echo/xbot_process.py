@@ -1,6 +1,6 @@
 """Xbot MCP server subprocess management.
 
-Manages the ami-browser MCP server as a child process, communicating
+Manages the xbot-browser MCP server as a child process, communicating
 via JSON-RPC 2.0 over stdio.
 """
 

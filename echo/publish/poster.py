@@ -2,19 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-import asyncpg
-import nats as nats_client
 from mcp import ClientSession
 
 from echo.publish.errors import PublishError, PublishResult
 from echo.publish.rate_limiter import RateLimiter
-
-DATABASE_URL = os.environ.get("DATABASE_URL", "")
-NATS_URL = os.environ.get("NATS_URL", "nats://localhost:4222")
 
 rate_limiter = RateLimiter()
 
@@ -33,13 +27,6 @@ class GeneratedReply:
     text: str
     strategy: str
     original_text: str | None = None
-
-
-async def _get_voice_profile_version(conn: asyncpg.Connection) -> str | None:
-    row = await conn.fetchrow(
-        "SELECT version FROM echo.voice_profiles WHERE is_active = true LIMIT 1"
-    )
-    return str(row["version"]) if row else None
 
 
 async def post_reply(
@@ -69,75 +56,31 @@ async def post_reply(
     # 2. Calculate timing
     time_to_reply = int((start_time - tweet.discovered_at).total_seconds())
 
-    conn = await asyncpg.connect(DATABASE_URL)
-    try:
-        voice_version = await _get_voice_profile_version(conn)
+    from echo.db.store import get_global_store
 
-        # 3. Store in echo.replies
-        await conn.execute(
-            """
-            INSERT INTO echo.replies (
-                tweet_id, reply_id, reply_url, reply_text, strategy,
-                was_edited, original_text, voice_profile_version,
-                time_to_reply_seconds, posted_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-            """,
-            tweet.tweet_id,
-            reply_id,
-            reply_url,
-            reply.text,
-            reply.strategy,
-            was_edited,
-            reply.original_text if was_edited else None,
-            voice_version,
-            time_to_reply,
-            start_time,
-        )
+    store = get_global_store()
 
-        # 4. Update tweet status
-        await conn.execute(
-            """
-            UPDATE echo.tweets
-            SET status = 'replied', replied_at = $1
-            WHERE tweet_id = $2
-            """,
-            datetime.now(timezone.utc),
-            tweet.tweet_id,
-        )
+    voice_version = await store.get_active_voice_version()
 
-        # 5. Update author interaction count
-        await conn.execute(
-            """
-            UPDATE echo.authors
-            SET times_replied_to = times_replied_to + 1,
-                last_replied_at = NOW()
-            WHERE handle = $1
-            """,
-            tweet.author_handle,
-        )
-    finally:
-        await conn.close()
+    # 3. Store reply in Cortex
+    await store.insert_reply({
+        "tweet_id": tweet.tweet_id,
+        "reply_id": reply_id,
+        "reply_url": reply_url,
+        "reply_text": reply.text,
+        "strategy": reply.strategy,
+        "was_edited": was_edited,
+        "original_text": reply.original_text if was_edited else None,
+        "voice_profile_version": voice_version,
+        "time_to_reply_seconds": time_to_reply,
+        "posted_at": start_time.isoformat(),
+    })
 
-    # 6. Emit NATS event
-    try:
-        nc = await nats_client.connect(NATS_URL)
-        await nc.publish(
-            "echo.reply.posted",
-            json.dumps(
-                {
-                    "tweet_id": tweet.tweet_id,
-                    "reply_id": reply_id,
-                    "reply_url": reply_url,
-                    "strategy": reply.strategy,
-                    "time_to_reply_seconds": time_to_reply,
-                    "posted_at": start_time.isoformat(),
-                }
-            ).encode(),
-        )
-        await nc.flush()
-        await nc.close()
-    except Exception:
-        pass  # NATS failure should not block publish success
+    # 4. Update tweet status
+    await store.update_tweet_status(tweet.tweet_id, "replied")
+
+    # 5. Update author interaction count
+    await store.increment_reply_count(tweet.author_handle)
 
     return PublishResult(
         success=True,

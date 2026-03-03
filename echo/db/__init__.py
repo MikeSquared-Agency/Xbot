@@ -1,4 +1,5 @@
-from echo.db.database import Database
+from echo.db.store import EchoStore, get_global_store, set_global_store
+from echo.db.cortex import CortexClient
 from echo.db.models import (
     Candidate,
     DailyDigest,
@@ -8,8 +9,15 @@ from echo.db.models import (
     Tweet,
 )
 
+# Legacy alias
+Database = EchoStore
+
 __all__ = [
+    "EchoStore",
+    "CortexClient",
     "Database",
+    "get_global_store",
+    "set_global_store",
     "Candidate",
     "DailyDigest",
     "GeneratedReply",

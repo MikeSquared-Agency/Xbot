@@ -1,32 +1,24 @@
-"""Phase 5: Persist digest and updated weights to DB."""
+"""Phase 5: Persist digest and updated weights."""
 
 from __future__ import annotations
 
-import json
-
-import asyncpg
+from datetime import date
 
 from echo.evolve.analyser import AnalysisResult
 
 
 async def store_digest(
-    conn: asyncpg.Connection,
+    store,
     analysis: AnalysisResult,
     digest_json: dict,
 ) -> None:
-    """Upsert today's digest into echo.daily_digests."""
-    await conn.execute(
-        """
-        INSERT INTO echo.daily_digests
-            (date, digest_json, total_replies_analysed, avg_engagement_score)
-        VALUES ($1, $2::jsonb, $3, $4)
-        ON CONFLICT (date) DO UPDATE SET
-            digest_json = EXCLUDED.digest_json,
-            total_replies_analysed = EXCLUDED.total_replies_analysed,
-            avg_engagement_score = EXCLUDED.avg_engagement_score
-        """,
-        analysis.date,
-        json.dumps(digest_json),
+    """Store today's digest in Cortex."""
+    date_str = analysis.date
+    if isinstance(date_str, date):
+        date_str = date_str.isoformat()
+    await store.store_digest(
+        date_str,
+        digest_json,
         analysis.total_replies,
         analysis.avg_engagement_score,
     )

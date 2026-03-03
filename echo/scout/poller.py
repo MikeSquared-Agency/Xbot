@@ -5,7 +5,7 @@ import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    import asyncpg
+    from echo.db.store import EchoStore
 
 from echo.scout.dedup import filter_already_seen
 from echo.scout.extraction import RawTweet, raw_tweet_from_dict
@@ -24,14 +24,14 @@ class ScoutPoller:
 
     def __init__(
         self,
-        pool: asyncpg.Pool,
+        store: EchoStore,
         xbot: XbotClient,
         watchlist_url: str,
         keywords: list[str],
         anti_signals: list[str] | None = None,
         niche_embedding: list[float] | None = None,
     ):
-        self.pool = pool
+        self.store = store
         self.xbot = xbot
         self.watchlist_url = watchlist_url
         self.keyword_rotator = KeywordRotator(keywords)
@@ -77,7 +77,7 @@ class ScoutPoller:
                  len(all_tweets), len(list_tweets), len(search_tweets))
 
         # 4. Filter out already seen
-        new_tweets = await filter_already_seen(self.pool, all_tweets)
+        new_tweets = await filter_already_seen(self.store, all_tweets)
 
         # 5. Hard filters
         list_ids = {t.tweet_id for t in list_tweets}
@@ -90,7 +90,7 @@ class ScoutPoller:
         log.info("After filters: %d candidates from %d new tweets",
                  len(candidates), len(new_tweets))
 
-        # 7. Write to echo.tweets
+        # 7. Write to Cortex
         if candidates:
             await self._insert_tweets(candidates)
 
@@ -133,70 +133,58 @@ class ScoutPoller:
             return []
 
     async def _insert_tweets(self, tweets: list[RawTweet]) -> None:
-        query = """
-            INSERT INTO echo.tweets (
-                tweet_id, tweet_url, author_handle, author_name,
-                author_verified, author_followers, content,
-                is_quote_tweet, is_reply, is_thread, has_media,
-                likes_t0, retweets_t0, replies_t0, bookmarks_t0, views_t0,
-                source, status, tweet_created_at, discovered_at
-            )
-            VALUES (
-                $1, $2, $3, $4,
-                $5, $6, $7,
-                $8, $9, $10, $11,
-                $12, $13, $14, $15, $16,
-                $17, 'queued', $18, NOW()
-            )
-            ON CONFLICT (tweet_id) DO NOTHING
-        """
-        async with self.pool.acquire() as conn:
-            await conn.executemany(query, [
-                (
-                    t.tweet_id, t.tweet_url, t.author_handle, t.author_name,
-                    t.author_verified, t.author_followers, t.content,
-                    t.is_quote_tweet, t.is_reply, t.is_thread, t.has_media,
-                    t.likes, t.retweets, t.replies, t.bookmarks, t.views,
-                    t.source, t.created_at,
-                )
-                for t in tweets
-            ])
-        log.info("Inserted %d tweets", len(tweets))
+        tweet_dicts = [
+            {
+                "tweet_id": t.tweet_id,
+                "tweet_url": t.tweet_url,
+                "author_handle": t.author_handle,
+                "author_name": t.author_name,
+                "author_verified": t.author_verified,
+                "author_followers": t.author_followers,
+                "content": t.content,
+                "is_quote_tweet": t.is_quote_tweet,
+                "is_reply": t.is_reply,
+                "is_thread": t.is_thread,
+                "has_media": t.has_media,
+                "likes_t0": t.likes,
+                "retweets_t0": t.retweets,
+                "replies_t0": t.replies,
+                "bookmarks_t0": t.bookmarks,
+                "views_t0": t.views,
+                "source": t.source,
+                "tweet_created_at": t.created_at,
+            }
+            for t in tweets
+        ]
+        inserted = await self.store.insert_tweets(tweet_dicts)
+        log.info("Inserted %d tweets", inserted)
 
     async def _rescrape_pending_tweets(self) -> None:
         """Re-scrape metrics for tweets still in the scoring window."""
-        rows = await self.pool.fetch("""
-            SELECT tweet_id, tweet_url FROM echo.tweets
-            WHERE status IN ('queued', 'presented')
-            AND discovered_at > NOW() - INTERVAL '4 hours'
-            ORDER BY virality_score DESC NULLS LAST
-            LIMIT $1
-        """, RESCRAPE_LIMIT)
+        pending = await self.store.get_pending_tweets_for_rescrape(RESCRAPE_LIMIT)
 
-        for row in rows:
+        for tweet in pending:
             try:
                 result = await self.xbot.call("x:get-tweet-metrics", {
-                    "tweet_url": row["tweet_url"],
+                    "tweet_url": tweet.get("tweet_url", ""),
                 })
                 metrics = _extract_json_content(result.get("content", []))
                 if not metrics:
                     continue
                 m = metrics[0] if isinstance(metrics, list) else metrics
 
-                await self.pool.execute("""
-                    INSERT INTO echo.tweet_metrics
-                        (tweet_id, likes, retweets, replies, bookmarks, views, scraped_at)
-                    VALUES ($1, $2, $3, $4, $5, $6, NOW())
-                """,
-                    row["tweet_id"],
-                    int(m.get("likes", 0)),
-                    int(m.get("retweets", 0)),
-                    int(m.get("replies", 0)),
-                    m.get("bookmarks"),
-                    m.get("views"),
+                await self.store.add_metric_snapshot(
+                    tweet.get("tweet_id", ""),
+                    {
+                        "likes": int(m.get("likes", 0)),
+                        "retweets": int(m.get("retweets", 0)),
+                        "replies": int(m.get("replies", 0)),
+                        "bookmarks": m.get("bookmarks"),
+                        "views": m.get("views"),
+                    },
                 )
             except Exception:
-                log.exception("Failed to rescrape tweet %s", row["tweet_id"])
+                log.exception("Failed to rescrape tweet %s", tweet.get("tweet_id", ""))
 
 
 def _extract_json_content(items: list | dict) -> list[dict]:

@@ -8,21 +8,20 @@ from rich.console import Console
 from echo.cli.commands import handle_digest, handle_history, handle_status
 from echo.cli.editor import open_in_editor
 from echo.cli.rendering import render_replies, render_tweet, render_waiting
-from echo.db.database import Database
-from echo.db.models import Candidate, GeneratedReply
+from echo.db.models import Candidate, GeneratedReply, Tweet
 
 
 class Publisher:
-    """Stub publisher — replace with the real Publish module (SPEC-XX)."""
+    """Stub publisher — replace with the real Publish module."""
 
     async def post(
         self,
-        db: Database,
+        store,
         candidate: Candidate,
         reply: GeneratedReply,
         was_edited: bool,
     ) -> str:
-        reply_id = await db.record_reply(
+        reply_id = await store.record_reply(
             tweet_id=candidate.tweet.tweet_id,
             reply_text=reply.text,
             strategy=reply.strategy,
@@ -35,11 +34,11 @@ class Publisher:
 class EchoCLI:
     def __init__(
         self,
-        db: Database,
+        store,
         publisher: Optional[Publisher] = None,
     ):
         self.console = Console()
-        self.db = db
+        self.store = store
         self.publisher = publisher or Publisher()
         self.running = True
 
@@ -48,13 +47,31 @@ class EchoCLI:
         self.console.print("[bold cyan]Echo CLI started[/]")
 
         while self.running:
-            candidate = await self.db.get_next_candidate()
+            candidate_data = await self.store.get_next_candidate()
 
-            if candidate:
+            if candidate_data:
+                # Convert dict to Candidate dataclass for rendering
+                tweet = Tweet(
+                    tweet_id=candidate_data.get("tweet_id", ""),
+                    tweet_url=candidate_data.get("tweet_url", ""),
+                    author_handle=candidate_data.get("author_handle", ""),
+                    author_name=candidate_data.get("author_name"),
+                    content=candidate_data.get("content", ""),
+                    author_followers=candidate_data.get("author_followers"),
+                    author_verified=candidate_data.get("author_verified", False),
+                    likes_t0=candidate_data.get("likes_t0", 0),
+                    replies_t0=candidate_data.get("replies_t0", 0),
+                    retweets_t0=candidate_data.get("retweets_t0", 0),
+                    virality_score=candidate_data.get("virality_score"),
+                    status=candidate_data.get("status", "queued"),
+                    tweet_created_at=candidate_data.get("tweet_created_at"),
+                    discovered_at=candidate_data.get("discovered_at"),
+                )
+                candidate = Candidate(tweet=tweet)
                 await self._present_candidate(candidate)
             else:
-                stats = await self.db.get_session_stats()
-                queue_depth = stats.queue_depth
+                stats = await self.store.get_session_stats()
+                queue_depth = stats.get("queue_depth", 0) if isinstance(stats, dict) else stats.queue_depth
                 render_waiting(self.console, queue_depth, stats)
                 await asyncio.sleep(10)
 
@@ -63,7 +80,7 @@ class EchoCLI:
     # ------------------------------------------------------------------
 
     async def _present_candidate(self, candidate: Candidate) -> None:
-        await self.db.update_status(candidate.tweet.tweet_id, "presented")
+        await self.store.update_tweet_status(candidate.tweet.tweet_id, "presented")
 
         render_tweet(self.console, candidate)
         render_replies(self.console, candidate.generated_replies)
@@ -99,7 +116,7 @@ class EchoCLI:
                 self.console.print("[red]No reply at that index.[/]")
                 return "continue"
             reply = replies[idx]
-            await self.publisher.post(self.db, candidate, reply, was_edited=False)
+            await self.publisher.post(self.store, candidate, reply, was_edited=False)
             self.console.print(f"[green]✓ Posted reply #{action}[/]")
             return "next"
 
@@ -108,7 +125,7 @@ class EchoCLI:
             return await self._handle_edit(action, candidate)
 
         if action == "s":
-            await self.db.update_status(candidate.tweet.tweet_id, "skipped")
+            await self.store.update_tweet_status(candidate.tweet.tweet_id, "skipped")
             self.console.print("[yellow]⏭ Skipped[/]")
             return "next"
 
@@ -116,15 +133,15 @@ class EchoCLI:
             return "quit"
 
         if action == "status":
-            await handle_status(self.console, self.db)
+            await handle_status(self.console, self.store)
             return "continue"
 
         if action == "history":
-            await handle_history(self.console, self.db)
+            await handle_history(self.console, self.store)
             return "continue"
 
         if action == "digest":
-            await handle_digest(self.console, self.db)
+            await handle_digest(self.console, self.store)
             return "continue"
 
         if action == "refresh":
@@ -161,6 +178,6 @@ class EchoCLI:
 
         reply.original_text = reply.text
         reply.text = new_text
-        await self.publisher.post(self.db, candidate, reply, was_edited=True)
+        await self.publisher.post(self.store, candidate, reply, was_edited=True)
         self.console.print("[green]✓ Posted edited reply[/]")
         return "next"

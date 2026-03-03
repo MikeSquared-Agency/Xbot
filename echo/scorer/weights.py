@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import os
-
 _cached_weights: dict | None = None
-_db_pool = None
 
 # Default weights matching SPEC-04 seed values
 DEFAULT_WEIGHTS: dict = {
@@ -32,24 +29,10 @@ DEFAULT_WEIGHTS: dict = {
 }
 
 
-async def get_db_pool():
-    """Lazy-init asyncpg connection pool."""
-    global _db_pool
-    if _db_pool is None:
-        import asyncpg
-
-        _db_pool = await asyncpg.create_pool(
-            os.environ["DATABASE_URL"],
-            min_size=1,
-            max_size=5,
-        )
-    return _db_pool
-
-
 async def get_active_weights(force_refresh: bool = False) -> dict:
-    """Load the active model weights from echo.model_weights.
+    """Load the active model weights from Cortex.
 
-    Falls back to DEFAULT_WEIGHTS if no active row exists.
+    Falls back to DEFAULT_WEIGHTS if no active weights exist.
     Caches in memory until force_refresh is True.
     """
     global _cached_weights
@@ -57,14 +40,11 @@ async def get_active_weights(force_refresh: bool = False) -> dict:
         return _cached_weights
 
     try:
-        pool = await get_db_pool()
-        row = await pool.fetchrow(
-            "SELECT weights_json FROM echo.model_weights WHERE is_active = TRUE LIMIT 1"
-        )
-        if row and row["weights_json"]:
-            import json
+        from echo.db.store import get_global_store
 
-            weights = json.loads(row["weights_json"]) if isinstance(row["weights_json"], str) else row["weights_json"]
+        store = get_global_store()
+        weights = await store.get_active_weights()
+        if weights:
             # Merge with defaults so any missing keys get filled
             merged = {**DEFAULT_WEIGHTS, **weights}
             _cached_weights = merged
@@ -77,6 +57,6 @@ async def get_active_weights(force_refresh: bool = False) -> dict:
 
 
 def invalidate_weights_cache():
-    """Clear the cached weights so next call re-fetches from DB."""
+    """Clear the cached weights so next call re-fetches."""
     global _cached_weights
     _cached_weights = None
