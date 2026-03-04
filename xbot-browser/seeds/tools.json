@@ -82,7 +82,7 @@
     {
       "domain": "x.com",
       "name": "x:get-list-feed",
-      "description": "Navigate to an X list and extract visible tweet cards. Returns the innerText of each tweet article element — the agent parses the structured text (author, handle, content, metrics, timestamp) itself. Requires an authenticated X session.",
+      "description": "Navigate to an X list and extract visible tweet cards with their URLs. Returns an array of { text, url } objects for each tweet. Requires an authenticated X session.",
       "inputSchema": [
         { "name": "list_url", "type": "string", "description": "Full URL of the X list (e.g. https://x.com/i/lists/123)", "required": true }
       ],
@@ -93,14 +93,22 @@
           { "action": "waitForLoadState", "state": "networkidle", "timeout": 15000 },
           { "action": "wait", "selector": "article[data-testid=\"tweet\"]", "timeout": 10000 },
           { "action": "scroll", "distance": 1000, "count": 3, "delay": 1500, "waitForLoadState": "networkidle", "timeout": 10000 },
-          { "action": "extract", "selector": "article[data-testid=\"tweet\"]", "extractMode": "innerTextList" }
+          {
+            "action": "extract",
+            "selector": "article[data-testid=\"tweet\"]",
+            "extractMode": "recordList",
+            "fields": [
+              { "name": "text", "extract": "innerText" },
+              { "name": "url", "subSelector": "a:has(time)", "extract": "attribute", "attribute": "href" }
+            ]
+          }
         ]
       }
     },
     {
       "domain": "x.com",
       "name": "x:search-tweets",
-      "description": "Search X for tweets matching a query. Navigates to X search with the given query and tab (default: Latest), then extracts visible tweet cards as innerText. The agent parses the structured text itself. Requires an authenticated X session.",
+      "description": "Search X for tweets matching a query. Returns an array of { text, url } objects for each tweet. Requires an authenticated X session.",
       "inputSchema": [
         { "name": "query", "type": "string", "description": "Search query string", "required": true },
         { "name": "tab", "type": "string", "description": "Search tab: latest or top", "required": false, "default": "latest" }
@@ -111,7 +119,15 @@
           { "action": "navigate", "urlTemplate": "https://x.com/search?q={query}&src=typed_query&f={tab}" },
           { "action": "waitForLoadState", "state": "networkidle", "timeout": 15000 },
           { "action": "wait", "selector": "article[data-testid=\"tweet\"]", "timeout": 10000 },
-          { "action": "extract", "selector": "article[data-testid=\"tweet\"]", "extractMode": "innerTextList" }
+          {
+            "action": "extract",
+            "selector": "article[data-testid=\"tweet\"]",
+            "extractMode": "recordList",
+            "fields": [
+              { "name": "text", "extract": "innerText" },
+              { "name": "url", "subSelector": "a:has(time)", "extract": "attribute", "attribute": "href" }
+            ]
+          }
         ]
       }
     },

@@ -272,6 +272,12 @@ function addDomExtraction(lines, selector, extractMode, attribute, extractAttrib
       lines.push(`  return { results };`);
       break;
 
+    case 'recordList':
+      // Generic structured extraction: for each matched parent, extract named fields from sub-selectors
+      // step.fields: [{ name, subSelector?, extract: "innerText"|"attribute"|"text", attribute? }]
+      // If no subSelector, extracts from the parent element itself
+      throw new Error('recordList extractMode requires Playwright selectors (use page.locator)');
+
     case 'html':
       lines.push(`  const result = await page.evaluate((sel) => { ${DEEP_QUERY_FNS} return deepQuery(sel)?.innerHTML || ''; }, ${qs(selector)});`);
       lines.push(`  return { result };`);
@@ -336,6 +342,10 @@ function addPlaywrightExtraction(lines, locatorExpr, extractMode, attribute, ext
       lines.push(`  const results = await ${locatorExpr}.evaluateAll(els => els.map(e => e.innerText));`);
       lines.push(`  return { results };`);
       break;
+
+    case 'recordList':
+      // Handled directly in workflow extract step (needs step.fields)
+      throw new Error('recordList extractMode requires workflow extract step with fields array');
 
     case 'html':
       lines.push(`  const result = await ${locatorExpr}.first().innerHTML();`);
@@ -593,6 +603,35 @@ function translateWorkflow(action, args) {
         const mode = step.extractMode || 'text';
         const into = step.into; // optional: store into variable instead of returning
         const cssSel = selectorToCss(sel);
+
+        // recordList: structured extraction with per-element sub-fields
+        if (mode === 'recordList' && step.fields) {
+          const locatorExpr = selectorToLocator(sel);
+          const fieldsJson = JSON.stringify(step.fields);
+          if (into) {
+            vars.add(into);
+            lines.push(`  var ${into} = await ${locatorExpr}.evaluateAll(function(els, _fields) {`);
+          } else {
+            lines.push(`  var results = await ${locatorExpr}.evaluateAll(function(els, _fields) {`);
+          }
+          lines.push(`    return els.map(function(el) {`);
+          lines.push(`      var rec = {};`);
+          lines.push(`      for (var i = 0; i < _fields.length; i++) {`);
+          lines.push(`        var f = _fields[i];`);
+          lines.push(`        var target = f.subSelector ? el.querySelector(f.subSelector) : el;`);
+          lines.push(`        if (!target) { rec[f.name] = null; continue; }`);
+          lines.push(`        if (f.extract === 'attribute') rec[f.name] = target.getAttribute(f.attribute || 'href');`);
+          lines.push(`        else if (f.extract === 'innerText') rec[f.name] = target.innerText;`);
+          lines.push(`        else rec[f.name] = target.textContent ? target.textContent.trim() : null;`);
+          lines.push(`      }`);
+          lines.push(`      return rec;`);
+          lines.push(`    });`);
+          lines.push(`  }, ${fieldsJson});`);
+          if (!into) {
+            lines.push(`  return { results };`);
+          }
+          break;
+        }
 
         if (into) {
           // Store extraction result into a variable (no return)
