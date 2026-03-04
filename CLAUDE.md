@@ -2,10 +2,11 @@
 
 ## Project Overview
 
-Xbot is an MCP server for browser automation that learns and reuses procedures. It has two main components:
+Xbot is an MCP server for browser automation that learns and reuses procedures. The agent drives all workflows directly using skills and browser tools — no Python orchestrator, no separate API calls.
 
-1. **xbot-browser** (Node.js) — MCP server built on Playwright with stored tools, graph memory (Cortex), and anti-detection
-2. **echo** (Python) — Tweet discovery and engagement system that uses xbot-browser as an MCP client
+**xbot-browser** (Node.js) — MCP server built on Playwright with stored tools, graph memory (Cortex), and anti-detection.
+
+**skills/** — Agent skill files that define multi-step workflows (tweet research, reply composition, analytics ingestion).
 
 ## MCP Tool Catalog
 
@@ -32,10 +33,17 @@ These are the tools an MCP client can call on xbot-browser. All tools communicat
 
 ### X (Twitter) Tools
 
-| Tool | Type | Description |
-|------|------|-------------|
-| `x:check-session` | readOnly | Check if X session is authenticated. Returns `{ authenticated, url, title }`. |
-| `x:pull-analytics` | readOnly | Pull X Analytics CSV. Navigates to analytics content tab, downloads CSV, returns raw text. Args: `{ days? }` (default 1). |
+All accessed via `xbot_execute({ toolName, args })`. Defined in `seeds/tools.json`, stored in Cortex.
+
+| Tool | Args | Returns |
+|------|------|---------|
+| `x:check-session` | none | `{ authenticated, url, title }` |
+| `x:pull-analytics` | `{ days? }` (default 1) | Raw CSV text with per-post metrics |
+| `x:get-list-feed` | `{ list_url }` | Array of `{ text, url }` per tweet |
+| `x:search-tweets` | `{ query, tab? }` (tab: latest/top) | Array of `{ text, url }` per tweet |
+| `x:get-author-profile` | `{ handle }` | `{ userName, bio, headerItems, followers, following, url }` |
+| `x:get-author-timeline` | `{ handle, count? }` | Array of tweet innerText strings |
+| `x:post-reply` | `{ tweet_url, reply_text }` | `{ success, url }` |
 
 ### How to Use the Browser MCP
 
@@ -45,23 +53,9 @@ These are the tools an MCP client can call on xbot-browser. All tools communicat
 3. If no saved tool → use `browser_snapshot` to see the page, then `browser_fallback` for raw Playwright actions
 4. After completing a task with fallback → save it with `add_create-config` + `add_tool`
 
-**Building a saved tool — full example:**
-```
-1. browser_navigate({ url: "https://example.com" })
-2. browser_snapshot({})                           → get element refs
-3. browser_fallback({ tool: "browser_click", arguments: { ref: "e12" } })
-4. add_create-config({ domain: "example.com", title: "Example Site" })
-   → returns configId
-5. add_tool({
-     configId: "...",
-     name: "search-products",
-     description: "Search by keyword",
-     inputSchema: '[{ "name": "query", "type": "string", "required": true }]',
-     execution: '{ "fields": [{ "selector": "#search", "param": "query" }], "submit": { "selector": "#go" }, "waitFor": ".results", "resultSelector": ".item", "resultType": "list" }'
-   })
-```
+**Execution definition shapes:**
 
-**Execution definition shape:**
+Single-page interaction:
 ```json
 {
   "fields": [{ "selector": "#input", "param": "query", "type": "fill" }],
@@ -74,9 +68,40 @@ These are the tools an MCP client can call on xbot-browser. All tools communicat
 }
 ```
 
-**resultExtract modes:** `text` (default), `list`, `html`, `attribute`, `table`, `innerText`, `innerTextList`
+Multi-step workflow:
+```json
+{
+  "type": "workflow",
+  "steps": [
+    { "action": "navigate", "urlTemplate": "https://example.com/{query}" },
+    { "action": "waitForLoadState", "state": "networkidle", "timeout": 15000 },
+    { "action": "wait", "selector": ".results", "timeout": 10000 },
+    { "action": "scroll", "distance": 1000, "count": 3, "delay": 1500 },
+    { "action": "extract", "selector": ".item", "extractMode": "recordList",
+      "fields": [
+        { "name": "text", "extract": "innerText" },
+        { "name": "url", "subSelector": "a", "extract": "attribute", "attribute": "href" }
+      ]
+    }
+  ]
+}
+```
+
+**Workflow step types:** `navigate`, `waitForLoadState`, `wait`, `click`, `fill`, `scroll`, `download`, `checkUrl`, `extract`, `return`
+
+**extractMode options:** `text`, `list`, `html`, `attribute`, `table`, `innerText`, `innerTextList`, `recordList`
 
 **Field types:** `fill` (default), `select`, `check`, `radio`, `click`
+
+## Skills
+
+Three agent-driven skills in `skills/`:
+
+| Skill | File | Purpose |
+|-------|------|---------|
+| `research-tweets` | `skills/research-tweets.md` | Find tweets worth replying to from watchlist + keyword search. Profile authors, assess virality, store candidates in Cortex. |
+| `compose-tweets` | `skills/compose-tweets.md` | Write and post replies. Pull voice profile + insights from Cortex, pick strategy, post via `x:post-reply`, record in Cortex. |
+| `x-analytics` | `skills/x-analytics.md` | Pull X analytics CSV, score against algorithm weights, store actionable insights in Cortex. |
 
 ## Cortex Graph Memory
 
@@ -101,7 +126,6 @@ All responses: `{ success: bool, data: ..., error: ... }`
 | `GET` | `/nodes/:id/neighbors` | Get connected nodes |
 | `POST` | `/search` | Semantic search: `{ query, limit }` |
 | `GET` | `/health` | Health check |
-| `GET` | `/briefing/:agent_id` | Get agent briefing |
 
 #### Node Shape
 
@@ -122,17 +146,7 @@ All responses: `{ success: bool, data: ..., error: ... }`
 - `relation` on edges: lowercase + underscores only (`"has_tool"`, `"reply_to"`)
 - No reinforce/decay endpoints — use `PATCH /nodes/:id` with `{ importance: newValue }`
 
-#### Create Node Example (curl)
-
-```bash
-curl -X POST 'http://localhost:9091/nodes?gate=skip' \
-  -H 'Content-Type: application/json' \
-  -H 'x-agent-id: echo' \
-  -H 'x-gate-override: true' \
-  -d '{"kind":"post","title":"123456","body":"{\"text\":\"hello\",\"impressions\":5}","source_agent":"echo","importance":0.5,"tags":["post","pid-123456"]}'
-```
-
-### Data Model — All Node Kinds
+### Data Model — Node Kinds
 
 #### xbot-browser nodes
 
@@ -143,50 +157,18 @@ curl -X POST 'http://localhost:9091/nodes?gate=skip' \
 
 Edges: `domain → tool` with `relation=has_tool`
 
-#### echo nodes
+#### Echo nodes (created by agent via skills)
 
 | Kind | Title | Tags | Body fields | Purpose |
 |------|-------|------|-------------|---------|
-| `tweet` | tweet_id | `["tweet", "status-queued", "tid-{id}", "author-{handle}"]` | `content, author_handle, tweet_url, virality_score, discovered_at, tweet_created_at` | Discovered tweet |
-| `reply` | `reply-{tweet_id}-{ts}` | `["reply", "tweet-{id}", "strategy-{s}"]` | `tweet_id, reply_text, strategy, posted_at, impressions, likes, reply_id` | Echo-generated reply |
-| `post` | post_id | `["post", "pid-{id}", "is-reply"?, "has-url"?]` | `text, impressions, likes, retweets, engagements, bookmarks, posted_at, post_url` | Analytics data (any post/reply from the account) |
-| `daily_digest` | date string | `["daily-digest"]` | `digest_json, total_replies, avg_score` | Daily performance digest |
-| `strategy_score` | `{date}-{strategy}` | `["strategy-score", "strategy-{s}"]` | `date, strategy, total, wins, win_rate` | Strategy effectiveness |
+| `tweet` | tweet_id | `["tweet", "status-queued", "tid-{id}", "author-{handle}"]` | `content, author_handle, tweet_url, virality_assessment, virality_reasoning, author_context, discovered_at` | Discovered tweet candidate |
+| `reply` | `reply-{tweet_id}-{ts}` | `["reply", "tweet-{id}", "strategy-{s}"]` | `tweet_id, reply_text, strategy, posted_at, reply_id, reply_url, author_handle` | Posted reply |
+| `author` | handle | `["author", "author-{handle}"]` | `handle, display_name, bio, followers, what_they_work_on, communication_style, responds_to_replies, times_we_replied, they_replied_back` | Author profile + interaction history |
+| `post` | post_id | `["post", "pid-{id}"]` | `text, impressions, likes, retweets, engagements, bookmarks, posted_at` | Analytics data |
+| `insight` | descriptive title | `["insight", "compose-pattern"?]` | `observation, evidence, confidence, source` | Analytics-derived pattern |
+| `voice_profile` | profile name | `["voice-profile", "active"?]` | `tone, vocabulary, sentence_structure, hooks, personality_markers` | Voice/style profile |
 
-Edges: `reply → tweet` with `relation=reply_to`, `author → tweet` with `relation=authored`
-
-### Accessing Cortex from Python (echo)
-
-**Client:** `echo/db/cortex.py` → `CortexClient` class
-
-```python
-from echo.db.cortex import CortexClient
-
-c = CortexClient(base_url="http://localhost:9091", source_agent="echo")
-node = await c.create_node(kind="post", title="123", body={"text": "hi"}, tags=["post"])
-nodes = await c.get_nodes(kind="post", tag="pid-123", limit=10)
-await c.update_node(node_id, body={"text": "updated"})
-```
-
-**Store:** `echo/db/store.py` → `EchoStore` class (higher-level, wraps CortexClient)
-
-```python
-from echo.db.store import EchoStore
-store = await EchoStore.connect()
-
-# Tweets
-await store.insert_tweets([{...}])
-await store.get_queued_tweets()
-
-# Replies
-await store.insert_reply({"tweet_id": "...", "reply_text": "...", "strategy": "..."})
-await store.find_reply_by_reply_id("123")
-await store.update_reply_metrics(node_id, {"impressions": 100, "likes": 5})
-
-# Post analytics (from X Analytics CSV)
-await store.upsert_post_analytics("post_id", {"text": "...", "impressions": 100})
-await store.find_post_by_id("post_id")
-```
+Edges: `reply → tweet` with `relation=reply_to`
 
 ### Accessing Cortex from JavaScript (xbot-browser)
 
@@ -206,36 +188,6 @@ const tool = await store.findToolByNameForDomain(domain, toolName);
 await store.updateTool(toolId, { execution: newExecution });
 ```
 
-## Connecting to xbot-browser as an MCP Client (Python)
-
-Use the official MCP SDK — not raw JSON-RPC. See `echo/xbot_process.py` for the production client.
-
-```python
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
-
-server_params = StdioServerParameters(
-    command="node",
-    args=["/path/to/xbot-browser/cli.js", "--browser", "chrome"],
-    env={**os.environ},
-)
-
-async with stdio_client(server_params) as (read, write):
-    async with ClientSession(read, write) as session:
-        await session.initialize()
-
-        # Call any MCP tool
-        result = await session.call_tool("browser_navigate", {"url": "https://example.com"})
-        result = await session.call_tool("x:pull-analytics", {"days": 7})
-
-        # Result has .content list — extract text
-        for item in result.content:
-            if hasattr(item, "text"):
-                print(item.text)
-```
-
-**Important:** `echo/xbot_process.py` wraps this as `XbotProcess` with long-lived session management. For one-shot scripts, use `stdio_client` directly (as in `echo/voice/bootstrap.py`).
-
 ## Critical Architecture
 
 ### Main Orchestrator
@@ -253,9 +205,18 @@ async with stdio_client(server_params) as (read, write):
 Tool definition (from Cortex) → action-translator.js → Playwright code string → browser_run_code
 ```
 
-The `execution` field on tools is a rich JSON object: `{ fields, submit, waitFor, resultSelector, resultType, resultExtract, delays, scrolls, verifySelector }`. The translator generates async Playwright code that runs in the browser context.
+The `execution` field on tools is a rich JSON object. The translator generates async Playwright code that runs in the browser context.
 
 **Important:** `browser_run_code` runs in the browser context (like `page.evaluate`). You CANNOT use `require('fs')` or Node.js APIs inside it. To read files from disk, return a path from `browser_run_code` and read it in the outer Node.js handler with `fs`.
+
+### Seed System
+
+`xbot-browser/seeds/tools.json` contains all pre-defined domain configs and tool definitions. On startup, `xbot-browser/src/cortex/seed.js` creates them in Cortex (non-destructive — skips existing tools).
+
+To update a tool definition in Cortex after changing seeds/tools.json:
+```bash
+node xbot-browser/scripts/update-cortex-tools.js "x:get-list-feed" "x:search-tweets"
+```
 
 ### Selector Types
 
@@ -273,32 +234,39 @@ The translator auto-detects which type and uses either `page.evaluate()` (DOM, f
 | File | Purpose | Key exports |
 |------|---------|-------------|
 | `xbot-backend.js` | Main MCP orchestrator | `XbotBackend` |
-| `action-translator.js` | Tool → Playwright code | `translateAction` |
-| `action-tools.js` | MCP tool schemas (Zod) | `xbotExecuteSchema`, `xPullAnalyticsSchema`, etc. |
+| `action-translator.js` | Tool → Playwright code | `translateAction`, `translateWorkflow` |
+| `action-tools.js` | MCP tool schemas (Zod) | `xbotExecuteSchema`, etc. |
 | `action-schema.js` | Validation schemas | Zod schemas for params, fields, execution |
 | `cortex/cortex-store.js` | Cortex storage layer | `CortexStore` |
 | `cortex/cortex-process.js` | Cortex autostart | `ensureCortexRunning` |
+| `cortex/seed.js` | Seed tools on startup | `seedIfNeeded` |
 | `cortex/tool-index.js` | Local upsert index | `ToolIndex`, `configKey`, `toolKey` |
 | `tools/registry.js` | Tool lookup for current page | `ToolRegistry` |
 | `tools/fallback.js` | Fallback tracking + save nudges | `FallbackTracker` |
-| `tools/x-tools.js` | X tools | `handleCheckSession`, `handlePullAnalytics` |
 | `browser/session.js` | Browser state save/load | `saveSession`, `loadSession` |
 | `browser/anti-detection.js` | Delay/jitter helpers | `resolveDelays`, `generateDelayCode` |
 
-### echo/ (Python)
+### skills/ (Markdown)
 
 | File | Purpose |
 |------|---------|
-| `orchestrator.py` | Main loop, poll cycle, evolve scheduler, analytics pull |
-| `xbot_process.py` | MCP client (wraps `stdio_client` + `ClientSession`) |
-| `db/cortex.py` | Low-level Cortex HTTP client |
-| `db/store.py` | High-level data store (EchoStore) |
-| `db/models.py` | Dataclasses: Tweet, Candidate, GeneratedReply |
-| `analytics/csv_import.py` | X Analytics CSV parser + Cortex import |
-| `cli/app.py` | Interactive CLI (EchoCLI) |
-| `scout/` | Tweet discovery |
-| `compose/` | Reply generation (Anthropic API) |
-| `voice/` | Voice profile analysis |
+| `research-tweets.md` | Tweet discovery and candidate evaluation |
+| `compose-tweets.md` | Reply writing, posting, and recording |
+| `x-analytics.md` | Analytics ingestion and insight generation |
+
+### xbot-browser/seeds/
+
+| File | Purpose |
+|------|---------|
+| `tools.json` | All pre-defined tools (11 tools across 3 domains) |
+
+### xbot-browser/scripts/
+
+| File | Purpose |
+|------|---------|
+| `test-x-tools.js` | Integration test for x: tools via MCP client |
+| `update-cortex-tools.js` | Patch tool definitions in Cortex from seeds |
+| `export-seeds.js` | Export current Cortex tools to seed format |
 
 ## Conventions
 
@@ -309,7 +277,6 @@ The translator auto-detects which type and uses either `page.evaluate()` (DOM, f
 - **MCP tool schemas:** defined using Zod via `playwright-core/lib/mcpBundle`
 - **Tests:** Playwright test framework (`@playwright/test`)
 - **No TypeScript compilation** — source files are plain .js, only type declarations (`.d.ts`) exist
-- **Cortex node IDs in Python:** always use `str` dtype when reading CSV tweet/post IDs (pandas will convert large ints to float scientific notation otherwise)
 
 ## Common Tasks
 
@@ -318,9 +285,15 @@ The translator auto-detects which type and uses either `page.evaluate()` (DOM, f
 1. Define schema in `action-tools.js` (Zod)
 2. Add to `listTools()` array in `xbot-backend.js`
 3. Add case to `callTool()` switch in `xbot-backend.js`
-4. Implement handler — either as `_handleXxx()` method on XbotBackend, or in a separate file (e.g., `tools/x-tools.js`) and import
+4. Implement handler — either as `_handleXxx()` method on XbotBackend, or in a separate file and import
 
-### Building a saved browser tool for a site
+### Adding a new X browser tool
+
+1. Add the tool definition to `seeds/tools.json` with workflow execution steps
+2. Restart xbot-browser (seeder creates it in Cortex) or run `update-cortex-tools.js`
+3. Test via `xbot_execute({ toolName, args })`
+
+### Building a saved browser tool for a new site
 
 1. Navigate to the site: `browser_navigate({ url })`
 2. Take a snapshot: `browser_snapshot({})` — learn the page structure
@@ -329,30 +302,6 @@ The translator auto-detects which type and uses either `page.evaluate()` (DOM, f
 5. Save the tool: `add_tool({ configId, name, inputSchema, execution })`
 6. Test it: `xbot_execute({ toolName, args })`
 
-### Storing data in Cortex from echo (Python)
-
-```python
-# Use EchoStore for high-level operations
-store = await EchoStore.connect()
-await store.upsert_post_analytics("post_id", {"text": "...", "impressions": 100})
-
-# Or use CortexClient for low-level node/edge operations
-from echo.db.cortex import CortexClient
-c = CortexClient()
-await c.create_node(kind="my_kind", title="unique-id", body={"data": "here"}, tags=["my_kind"])
-```
-
-### Running Echo
-
-```bash
-cd /path/to/Xbot
-source echo/.venv/bin/activate
-export X_PROFILE_HANDLE="YourHandle"
-python3 run_echo.py
-```
-
-CLI commands during run: `analytics [days]`, `status`, `history`, `digest`, `s` (skip), `q` (quit)
-
 ### Running tests
 
 ```bash
@@ -360,6 +309,7 @@ cd xbot-browser
 npm test                    # all tests
 npm run ctest               # chrome only
 npx playwright test tests/cortex/  # cortex tests only
+node scripts/test-x-tools.js --browser chrome  # x: tool integration tests
 ```
 
 ## Environment Variables
@@ -370,8 +320,6 @@ npx playwright test tests/cortex/  # cortex tests only
 | `CORTEX_DATA_DIR` | no | `./data/cortex` | Cortex data directory |
 | `CORTEX_AUTOSTART` | no | `true` | Auto-start Cortex binary |
 | `CORTEX_TIMEOUT_MS` | no | `2000` | HTTP timeout for Cortex |
-| `ANTHROPIC_API_KEY` | for echo | — | Anthropic API key |
-| `X_PROFILE_HANDLE` | for echo | — | X handle for echo |
 
 ## Do NOT
 
@@ -383,6 +331,4 @@ npx playwright test tests/cortex/  # cortex tests only
 - Assume Cortex has reinforce/decay endpoints (it doesn't)
 - Modify `action-translator.js` selector detection logic without understanding both DOM and Playwright code paths
 - Use `require()` or Node.js APIs inside `browser_run_code` — it runs in browser context
-- Read pandas tweet/post IDs without `dtype=str` — large IDs become float scientific notation
-- Use raw JSON-RPC to talk to xbot-browser — use the MCP SDK (`stdio_client` + `ClientSession`)
 - Print to `console.log`/`console.info` in xbot-browser server code — it corrupts the MCP stdio stream. Use `console.error` (stderr) for logging.
