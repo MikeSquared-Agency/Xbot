@@ -92,6 +92,7 @@
           { "action": "navigate", "url": "{list_url}" },
           { "action": "waitForLoadState", "state": "networkidle", "timeout": 15000 },
           { "action": "wait", "selector": "article[data-testid=\"tweet\"]", "timeout": 10000 },
+          { "action": "scroll", "distance": 1000, "count": 3, "delay": 1500, "waitForLoadState": "networkidle", "timeout": 10000 },
           { "action": "extract", "selector": "article[data-testid=\"tweet\"]", "extractMode": "innerTextList" }
         ]
       }
