@@ -371,6 +371,50 @@ function addPlaywrightExtraction(lines, locatorExpr, extractMode, attribute, ext
   }
 }
 
+/**
+ * Store extraction result into a named variable (DOM selectors).
+ * Used by workflow extract steps with `into` field.
+ */
+function addDomExtractionVar(lines, selector, extractMode, varName, attribute) {
+  switch (extractMode) {
+    case 'innerTextList':
+      lines.push(`  var ${varName} = await page.evaluate((sel) => { ${DEEP_QUERY_FNS} return deepQueryAll(sel).map(e => e.innerText); }, ${qs(selector)});`);
+      break;
+    case 'innerText':
+      lines.push(`  var ${varName} = await page.evaluate((sel) => { ${DEEP_QUERY_FNS} return deepQuery(sel)?.innerText || null; }, ${qs(selector)});`);
+      break;
+    case 'attribute':
+      lines.push(`  var ${varName} = await page.evaluate((sel, attr) => { ${DEEP_QUERY_FNS} return deepQuery(sel)?.getAttribute(attr) || null; }, ${qs(selector)}, ${qs(attribute || 'href')});`);
+      break;
+    case 'text':
+    default:
+      lines.push(`  var ${varName} = await page.evaluate((sel) => { ${DEEP_QUERY_FNS} return deepQuery(sel)?.textContent?.trim() || null; }, ${qs(selector)});`);
+      break;
+  }
+}
+
+/**
+ * Store extraction result into a named variable (Playwright selectors).
+ */
+function addPlaywrightExtractionVar(lines, locatorExpr, extractMode, varName, attribute) {
+  switch (extractMode) {
+    case 'innerTextList':
+      lines.push(`  var ${varName} = await ${locatorExpr}.evaluateAll(els => els.map(e => e.innerText));`);
+      break;
+    case 'innerText':
+      lines.push(`  var ${varName} = await ${locatorExpr}.first().innerText().catch(() => null);`);
+      break;
+    case 'attribute':
+      lines.push(`  var ${varName} = await ${locatorExpr}.first().getAttribute(${qs(attribute || 'href')}).catch(() => null);`);
+      break;
+    case 'text':
+    default:
+      lines.push(`  var ${varName} = await ${locatorExpr}.first().textContent().catch(() => null);`);
+      lines.push(`  ${varName} = ${varName}?.trim() || null;`);
+      break;
+  }
+}
+
 // --- Workflow translation ---
 
 /**
@@ -530,16 +574,41 @@ function translateWorkflow(action, args) {
         break;
       }
 
+      case 'scroll': {
+        const distance = step.distance || 800;
+        const count = step.count || 1;
+        const delay = step.delay || 1000;
+        for (let i = 0; i < count; i++) {
+          lines.push(`  await page.evaluate(() => window.scrollBy(0, ${distance}));`);
+          lines.push(`  await page.waitForTimeout(${delay});`);
+        }
+        if (step.waitForLoadState) {
+          lines.push(`  await page.waitForLoadState(${JSON.stringify(step.waitForLoadState)}, { timeout: ${step.timeout || 10000} }).catch(() => {});`);
+        }
+        break;
+      }
+
       case 'extract': {
         const sel = step.selector;
         const mode = step.extractMode || 'text';
+        const into = step.into; // optional: store into variable instead of returning
         const cssSel = selectorToCss(sel);
 
-        if (cssSel) {
-          addDomExtraction(lines, cssSel, mode, step.attribute, step.extractAttributes);
-        } else if (sel) {
-          const locatorExpr = selectorToLocator(sel);
-          addPlaywrightExtraction(lines, locatorExpr, mode, step.attribute, step.extractAttributes);
+        if (into) {
+          // Store extraction result into a variable (no return)
+          vars.add(into);
+          if (cssSel) {
+            addDomExtractionVar(lines, cssSel, mode, into, step.attribute);
+          } else if (sel) {
+            addPlaywrightExtractionVar(lines, selectorToLocator(sel), mode, into, step.attribute);
+          }
+        } else {
+          if (cssSel) {
+            addDomExtraction(lines, cssSel, mode, step.attribute, step.extractAttributes);
+          } else if (sel) {
+            const locatorExpr = selectorToLocator(sel);
+            addPlaywrightExtraction(lines, locatorExpr, mode, step.attribute, step.extractAttributes);
+          }
         }
         break;
       }

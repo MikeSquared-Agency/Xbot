@@ -80,6 +80,135 @@
       }
     },
     {
+      "domain": "x.com",
+      "name": "x:get-list-feed",
+      "description": "Navigate to an X list and extract visible tweet cards. Returns the innerText of each tweet article element — the agent parses the structured text (author, handle, content, metrics, timestamp) itself. Requires an authenticated X session.",
+      "inputSchema": [
+        { "name": "list_url", "type": "string", "description": "Full URL of the X list (e.g. https://x.com/i/lists/123)", "required": true }
+      ],
+      "execution": {
+        "type": "workflow",
+        "steps": [
+          { "action": "navigate", "url": "{list_url}" },
+          { "action": "waitForLoadState", "state": "networkidle", "timeout": 15000 },
+          { "action": "wait", "selector": "article[data-testid=\"tweet\"]", "timeout": 10000 },
+          { "action": "extract", "selector": "article[data-testid=\"tweet\"]", "extractMode": "innerTextList" }
+        ]
+      }
+    },
+    {
+      "domain": "x.com",
+      "name": "x:search-tweets",
+      "description": "Search X for tweets matching a query. Navigates to X search with the given query and tab (default: Latest), then extracts visible tweet cards as innerText. The agent parses the structured text itself. Requires an authenticated X session.",
+      "inputSchema": [
+        { "name": "query", "type": "string", "description": "Search query string", "required": true },
+        { "name": "tab", "type": "string", "description": "Search tab: latest or top", "required": false, "default": "latest" }
+      ],
+      "execution": {
+        "type": "workflow",
+        "steps": [
+          { "action": "navigate", "urlTemplate": "https://x.com/search?q={query}&src=typed_query&f={tab}" },
+          { "action": "waitForLoadState", "state": "networkidle", "timeout": 15000 },
+          { "action": "wait", "selector": "article[data-testid=\"tweet\"]", "timeout": 10000 },
+          { "action": "extract", "selector": "article[data-testid=\"tweet\"]", "extractMode": "innerTextList" }
+        ]
+      }
+    },
+    {
+      "domain": "x.com",
+      "name": "x:get-author-profile",
+      "description": "Navigate to an X user's profile and extract structured profile data: display name, handle, bio, location, website, join date, follower/following counts. Requires an authenticated X session.",
+      "inputSchema": [
+        { "name": "handle", "type": "string", "description": "X handle without @ (e.g. Hesamation)", "required": true }
+      ],
+      "execution": {
+        "type": "workflow",
+        "steps": [
+          { "action": "navigate", "urlTemplate": "https://x.com/{handle}" },
+          { "action": "waitForLoadState", "state": "networkidle", "timeout": 15000 },
+          { "action": "wait", "selector": "[data-testid=\"UserName\"]", "timeout": 10000 },
+          { "action": "extract", "selector": "[data-testid=\"UserName\"]", "extractMode": "innerText", "into": "userName" },
+          { "action": "extract", "selector": "[data-testid=\"UserDescription\"]", "extractMode": "innerText", "into": "bio" },
+          { "action": "extract", "selector": "[data-testid=\"UserProfileHeader_Items\"]", "extractMode": "innerText", "into": "headerItems" },
+          { "action": "extract", "selector": "a[href$=\"/verified_followers\"]", "extractMode": "innerText", "into": "followers" },
+          { "action": "extract", "selector": "a[href$=\"/following\"]", "extractMode": "innerText", "into": "following" },
+          {
+            "action": "return",
+            "value": {
+              "userName": "userName",
+              "bio": "bio",
+              "headerItems": "headerItems",
+              "followers": "followers",
+              "following": "following",
+              "url": "$url"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "domain": "x.com",
+      "name": "x:get-author-timeline",
+      "description": "Navigate to an X user's profile and extract their recent tweets. Scrolls down to load more tweets beyond the pinned/first few. Returns the innerText of each tweet article element. The agent parses author, content, and metrics itself. Requires an authenticated X session.",
+      "inputSchema": [
+        { "name": "handle", "type": "string", "description": "X handle without @ (e.g. Hesamation)", "required": true },
+        { "name": "count", "type": "number", "description": "Approximate number of tweets to fetch (controls scroll count)", "required": false, "default": 10 }
+      ],
+      "execution": {
+        "type": "workflow",
+        "steps": [
+          { "action": "navigate", "urlTemplate": "https://x.com/{handle}" },
+          { "action": "waitForLoadState", "state": "networkidle", "timeout": 15000 },
+          { "action": "wait", "selector": "article[data-testid=\"tweet\"]", "timeout": 10000 },
+          { "action": "scroll", "distance": 1000, "count": 3, "delay": 1500, "waitForLoadState": "networkidle", "timeout": 10000 },
+          { "action": "extract", "selector": "article[data-testid=\"tweet\"]", "extractMode": "innerTextList" }
+        ]
+      }
+    },
+    {
+      "domain": "x.com",
+      "name": "x:post-reply",
+      "description": "Post a reply to a specific tweet. Navigates to the tweet, clicks the reply compose area, types the reply text, and clicks Reply. Returns success status. Requires an authenticated X session. IMPORTANT: Use sparingly — rate limits apply.",
+      "inputSchema": [
+        { "name": "tweet_url", "type": "string", "description": "Full URL of the tweet to reply to", "required": true },
+        { "name": "reply_text", "type": "string", "description": "The reply text (max 280 chars)", "required": true }
+      ],
+      "execution": {
+        "type": "workflow",
+        "steps": [
+          { "action": "navigate", "url": "{tweet_url}" },
+          { "action": "waitForLoadState", "state": "networkidle", "timeout": 15000 },
+          {
+            "action": "wait",
+            "selector": "div[data-testid=\"tweetTextarea_0\"]",
+            "timeout": 10000
+          },
+          {
+            "action": "click",
+            "selector": "div[data-testid=\"tweetTextarea_0\"]",
+            "fallbackSelectors": [
+              "div[data-testid=\"tweetTextarea_0RichTextInputContainer\"]",
+              "div[role=\"textbox\"][data-testid=\"tweetTextarea_0\"]",
+              "[aria-label=\"Post text\"]",
+              "[aria-label=\"Post your reply\"]"
+            ]
+          },
+          { "action": "fill", "selector": "div[data-testid=\"tweetTextarea_0\"]", "param": "reply_text" },
+          {
+            "action": "click",
+            "selector": "[data-testid=\"tweetButtonInline\"]",
+            "fallbackSelectors": [
+              "[data-testid=\"tweetButton\"]",
+              "button[data-testid*=\"Reply\"]",
+              "div[role=\"button\"][data-testid*=\"tweet\"]"
+            ]
+          },
+          { "action": "waitForLoadState", "state": "networkidle", "timeout": 10000 },
+          { "action": "return", "value": { "success": true, "url": "$url" } }
+        ]
+      }
+    },
+    {
       "domain": "accounts.google.com",
       "name": "google-enter-email",
       "description": "Enter an email address on the Google sign-in page and click Next",

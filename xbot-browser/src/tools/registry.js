@@ -68,6 +68,10 @@ class ToolRegistry {
     if (!tool) {
       tool = await this._store.findToolByName(toolName);
     }
+    // Skip ghost nodes (deleted nodes with empty body still appear via neighbor edges)
+    if (tool && (!tool.execution || Object.keys(tool.execution).length === 0)) {
+      tool = await this._store.findToolByName(toolName);
+    }
     return tool;
   }
 }
