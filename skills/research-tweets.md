@@ -18,8 +18,9 @@ so the compose skill has everything it needs.
 ## Tools
 
 - `x:check-session` — verify X authentication before starting
+- `x:get-home-feed` — scroll the For You feed for fresh candidates
 - `x:get-list-feed { list_url }` — scrape tweets from the watchlist
-- `x:search-tweets { query, tab }` — search X by keyword (use `tab: "latest"`)
+- `x:search-tweets { query, tab }` — search X by keyword (use `tab: "live"`)
 - `x:get-author-profile { handle }` — scrape an author's profile (bio, followers, etc.)
 - `x:get-author-timeline { handle, count }` — scrape an author's recent tweets
 - `cortex:search` / `cortex:recall` — pull persona, playbook, insights, known authors
@@ -69,16 +70,26 @@ authority — everything gets checked against it.
 x:get-list-feed { list_url: "https://x.com/i/lists/2027463448406204882" }
 ```
 
-Curated accounts — tweets from here get natural priority over search results.
+Curated accounts we specifically want to engage with. Always check this first.
 
-### Keyword search (secondary)
+### Home feed (secondary)
 
 ```
-x:search-tweets { query: "AI agents", tab: "latest" }
+x:get-home-feed
 ```
 
-Rotate keywords across sessions. Good keywords are specific to your niche — not so broad
-you drown in noise. Keywords from `persona.topics_we_engage` are your rotation source.
+The For You feed is algorithmically curated with fresh, trending content. Check for
+anything the watchlist didn't surface.
+
+### Keyword search (tertiary)
+
+```
+x:search-tweets { query: "AI agents", tab: "live" }
+```
+
+Only if the home feed and watchlist didn't surface enough candidates. Rotate keywords
+across sessions from `persona.topics_we_engage`. Use `tab: "live"` (not "latest") to
+get chronologically sorted results.
 
 ## Step 3: Hard Pre-Filter
 
@@ -88,6 +99,9 @@ Before relevance evaluation, discard these immediately:
 - Spam: crypto giveaways, "DM me", follow-back, airdrops, NFTs, presales, whitelist
 - Already in Cortex: `cortex:search { query: "tid-{tweet_id}" }` — skip if found
 - Already replied to this author 2-3 times today (check recent reply nodes)
+- **Skip-author**: `cortex:search { query: "author @handle" }` — if the author node
+  has a `skip-author` tag, discard immediately. These are authors who have flagged or
+  blocked AI-generated replies. Do not engage under any circumstances.
 
 Anything that passes, move to Stage 1.
 

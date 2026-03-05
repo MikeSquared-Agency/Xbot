@@ -81,6 +81,30 @@
     },
     {
       "domain": "x.com",
+      "name": "x:get-home-feed",
+      "description": "Scroll the X home feed (For you tab) and extract visible tweet cards with their URLs. Returns an array of { text, url } objects. Uses the algorithmic For you feed which surfaces trending and relevant content. Requires an authenticated X session.",
+      "inputSchema": [],
+      "execution": {
+        "type": "workflow",
+        "steps": [
+          { "action": "navigate", "url": "https://x.com/home" },
+          { "action": "waitForLoadState", "state": "networkidle", "timeout": 15000 },
+          { "action": "wait", "selector": "article[data-testid=\"tweet\"]", "timeout": 10000 },
+          { "action": "scroll", "distance": 1000, "count": 5, "delay": 1500, "waitForLoadState": "networkidle", "timeout": 10000 },
+          {
+            "action": "extract",
+            "selector": "article[data-testid=\"tweet\"]",
+            "extractMode": "recordList",
+            "fields": [
+              { "name": "text", "extract": "innerText" },
+              { "name": "url", "subSelector": "a:has(time)", "extract": "attribute", "attribute": "href" }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "domain": "x.com",
       "name": "x:get-list-feed",
       "description": "Navigate to an X list and extract visible tweet cards with their URLs. Returns an array of { text, url } objects for each tweet. Requires an authenticated X session.",
       "inputSchema": [
@@ -111,7 +135,7 @@
       "description": "Search X for tweets matching a query. Returns an array of { text, url } objects for each tweet. Requires an authenticated X session.",
       "inputSchema": [
         { "name": "query", "type": "string", "description": "Search query string", "required": true },
-        { "name": "tab", "type": "string", "description": "Search tab: latest or top", "required": false, "default": "latest" }
+        { "name": "tab", "type": "string", "description": "Search tab: live (latest) or top", "required": false, "default": "live" }
       ],
       "execution": {
         "type": "workflow",
