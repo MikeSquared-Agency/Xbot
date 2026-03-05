@@ -36,10 +36,10 @@ cortex:search { query: "tweet status-queued" }
 ```
 
 The tweet node contains `virality_rating`, `niche_match`, `virality_reasoning`,
-`author_context`, and `author_type` — stored by the scout skill. These tell you how
-much effort to invest and what angle will land.
+`author_context`, `author_type`, and `author_source` — stored by the scout skill.
+These tell you how much effort to invest and what angle will land.
 
-For deeper author context:
+For deeper author context if they're a known contact:
 
 ```
 cortex:search { query: "author @handle" }
@@ -91,17 +91,17 @@ Pick the strategy that fits the tweet AND the author. Three inputs:
    A question invites experience or additive. An insight invites additive or question.
 
 2. **Author context** — `communication_style` and `responds_to_replies` from the author
-   node. If they never respond, avoid question. If they engage with pushback, consider
-   contrarian.
+   node or `author_context` field on the tweet. If they never respond, avoid question.
+   If they engage with pushback, consider contrarian.
 
 3. **Performance hints** — check `performance_hint` on each playbook strategy. If a hint
    says "contrarian underperforms on founders (n=8)", don't use contrarian on a founder
    unless the tweet is an unusually strong fit. Hints are advisory, not overrides.
 
-Cross-reference the `author_type` from the tweet node against hints — hints are
-more useful when the author type matches.
+Cross-reference the `author_type` from the tweet node against hints — hints are more
+useful when the author type matches.
 
-Don't force a strategy. If none genuinely fits the tweet + author combination, say so.
+Don't force a strategy. If none genuinely fits, say so.
 
 ## Step 3: Write 5 Suggestions
 
@@ -196,20 +196,38 @@ cortex:relate {
 
 Critical fields for analytics:
 - `strategy` — the strategy actually used (not just generated), drives performance audit
-- `author_type` — from the tweet/author node, enables strategy × author-type pattern detection
-- `virality_rating` — used to correlate strategy performance with tweet quality
+- `author_type` — enables strategy × author-type pattern detection
+- `virality_rating` — correlates strategy performance with tweet quality
 - `niche_match` — `"hard"` or `"soft"`, context for evaluating outcomes
 
-### Update author interaction count
+### Create or update the author node
 
-Pull the author node and increment `times_we_replied`:
+Check whether this author already has a Cortex node:
 
 ```
-cortex:recall { query: "author @handle" }
+cortex:search { query: "author @handle" }
 ```
 
-PATCH the node with `times_we_replied` incremented by 1. Do not reset `they_replied_back`
-— that only gets updated when the analytics skill detects an actual reply from the author.
+**If the node exists** (watchlist author or previously replied-to author):
+PATCH to increment `times_we_replied` by 1. Do not touch `they_replied_back` — that
+only updates when analytics detects an actual reply from them.
+
+**If no node exists** (first reply to a home feed or search author):
+This is the moment to promote them from working memory to the graph. The `author_context`
+field on the tweet node has everything the scout scraped — use it to create the full
+author node now:
+
+```
+cortex:store {
+  kind: "author",
+  title: "{handle}",
+  body: "{\"handle\":\"@handle\",\"display_name\":\"...\",\"bio\":\"...\",\"followers\":...,\"author_type\":\"...\",\"what_they_work_on\":\"...\",\"audience_values\":\"...\",\"communication_style\":\"...\",\"responds_to_replies\":...,\"times_we_replied\":1,\"they_replied_back\":0,\"source\":\"search\",\"updated_at\":\"...\"}",
+  tags: ["author", "author-{handle}"]
+}
+```
+
+Set `times_we_replied: 1` directly — this is that first reply. Set `source` to `"home"`
+or `"search"` from the tweet node's `author_source` field.
 
 ## Step 7: Mark Tweet as Replied
 
