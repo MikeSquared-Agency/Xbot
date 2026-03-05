@@ -197,6 +197,25 @@ const addDeleteToolSchema = {
   type: 'action',
 };
 
+const scoreViralitySchema = {
+  name: 'score_virality',
+  title: 'Score tweet virality',
+  description: `Calculate a virality score for a tweet candidate based on X algorithm weights.
+Returns a score, rating (high/medium/low/skip), reasoning, and breakdown.
+Uses reply (13.5x), retweet (20x), bookmark (10x), like (1x) weights with exponential time decay (50% per 6h).`,
+  inputSchema: z.object({
+    replies: z.number().describe('Number of replies'),
+    retweets: z.number().describe('Number of retweets/reposts'),
+    likes: z.number().describe('Number of likes'),
+    bookmarks: z.number().optional().describe('Number of bookmarks'),
+    views: z.number().optional().describe('Number of views/impressions'),
+    age_hours: z.number().describe('Tweet age in hours'),
+    author_followers: z.number().optional().describe('Author follower count'),
+    author_replies_back: z.boolean().optional().describe('Whether the author typically replies back to replies'),
+  }),
+  type: 'readOnly',
+};
+
 module.exports = {
   xbotExecuteSchema,
   browserFallbackSchema,
@@ -205,4 +224,5 @@ module.exports = {
   addToolSchema,
   addUpdateToolSchema,
   addDeleteToolSchema,
+  scoreViralitySchema,
 };

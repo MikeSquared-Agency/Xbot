@@ -21,7 +21,9 @@ const {
   addToolSchema,
   addUpdateToolSchema,
   addDeleteToolSchema,
+  scoreViralitySchema,
 } = require('./action-tools');
+const { scoreVirality } = require('./score-virality');
 
 class XbotBackend {
   constructor(config, browserContextFactory, options = {}) {
@@ -82,6 +84,7 @@ class XbotBackend {
       addToolSchema,
       addUpdateToolSchema,
       addDeleteToolSchema,
+      scoreViralitySchema,
     ].map(schema => toMcpTool(schema));
   }
 
@@ -105,6 +108,8 @@ class XbotBackend {
         return this._handleUpdateTool(rawArguments);
       case 'add_delete-tool':
         return this._handleDeleteTool(rawArguments);
+      case 'score_virality':
+        return this._handleScoreVirality(rawArguments);
       default:
         return {
           content: [{ type: 'text', text: `### Error\nTool "${name}" not found. Use browser_fallback to access raw Playwright tools.` }],
@@ -791,6 +796,13 @@ ${toolList}
     return {
       content: [{ type: 'text', text: `### Deleted\nTool "${toolName}" removed from ${tool.domain}.` }],
     };
+  }
+
+  _handleScoreVirality(args) {
+    const result = scoreVirality(args)
+    return {
+      content: [{ type: 'text', text: `### Virality Score: ${result.score} (${result.rating})\n${result.reasoning}\n\n**Breakdown:** ${JSON.stringify(result.breakdown)}` }],
+    }
   }
 
   async serverClosed(server) {

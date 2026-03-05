@@ -16,12 +16,38 @@ virality potential, and store the full context so the compose skill has everythi
 
 ## Tools
 
+- `x:check-session` — verify X authentication before starting
 - `x:get-list-feed { list_url }` — scrape tweets from the watchlist
 - `x:search-tweets { query, tab }` — search X by keyword (use `tab: "latest"`)
 - `x:get-author-profile { handle }` — scrape an author's profile (bio, followers, etc.)
 - `x:get-author-timeline { handle, count }` — scrape an author's recent tweets
 - `cortex:search` / `cortex:recall` — pull insights, past interactions, known authors
 - `cortex:store` — store candidates and author profiles
+- `google-enter-email { email }` — enter email on Google sign-in page
+- `google-enter-password { password }` — enter password on Google sign-in page
+
+## Step 0: Authenticate
+
+Before doing anything, verify the X session is live.
+
+```
+x:check-session
+```
+
+If `authenticated` is `true`, skip to **Sources**.
+
+If `authenticated` is `false`, log in via Google first:
+
+1. **Navigate to Google** — `browser_navigate({ url: "https://accounts.google.com" })`
+2. **Enter email** — `xbot_execute({ toolName: "google-enter-email", args: { email } })`.
+   Ask the user for their email if not already known.
+3. **Enter password** — `xbot_execute({ toolName: "google-enter-password", args: { password } })`.
+   Ask the user for their password.
+4. **Navigate back to X** — `browser_navigate({ url: "https://x.com/home" })`
+5. **Click "Sign in with Google"** on the X login page using `browser_snapshot` +
+   `browser_fallback` → `browser_click` on the Google sign-in button.
+6. **Verify** — run `x:check-session` again. If still not authenticated, stop and
+   tell the user.
 
 ## Sources
 
@@ -54,11 +80,14 @@ than a decent tweet from someone who always responds.
 cortex:search { query: "author @handle" }
 ```
 
-If you already have an `author` node for this person, read it. It has their bio, what they
-work on, how they engage, and your past interaction history with them (how many times you've
-replied, whether they responded back).
+If you already have an `author` node for this person with good data (bio, what they work on,
+communication style, interaction history), **use it as-is**. Don't re-scrape profiles or
+timelines for known authors — Cortex already has their persona.
 
-### If unknown or stale, scrape
+### Only research unknown or sparse authors
+
+If Cortex has **no author node** or the existing node is missing key fields (no bio, no
+`what_they_work_on`, no `communication_style`), then scrape:
 
 ```
 x:get-author-profile { handle: "Hesamation" }
@@ -67,18 +96,11 @@ x:get-author-timeline { handle: "Hesamation", count: 10 }
 
 From the profile and recent tweets, form your own understanding of:
 
-- **What do they work on?** Their bio and recent tweets reveal their domain. For example,
-  @Hesamation works on AI research and reasoning models — a reply about frontend frameworks
-  would miss completely.
-- **What does their audience value?** Look at which of their tweets get the most engagement.
-  That's what their followers respond to. If their top tweets are deep technical threads,
-  their audience wants depth, not hot takes.
-- **What's their communication style?** Technical? Casual? Provocative? Meme-heavy? Your
-  reply needs to match their register or you'll feel out of place in their thread.
-- **Do they engage with replies?** This is the most important question. Look at their recent
-  tweets — do they respond in the replies? An author who responds triggers the +75
-  author-engages-back signal. This single data point should heavily influence whether you
-  prioritise this tweet.
+- **What do they work on?** Their bio and recent tweets reveal their domain.
+- **What does their audience value?** Which tweets get the most engagement?
+- **What's their communication style?** Technical? Casual? Provocative? Meme-heavy?
+- **Do they engage with replies?** The most important question. The +75
+  author-engages-back signal makes this the single most important author attribute.
 
 ### Store or update the author
 
@@ -102,42 +124,50 @@ than creating a duplicate.
 For each tweet, judge how likely it is to blow up. This replaces the old scoring formula —
 you can just read the tweet and think about it.
 
-### Momentum (observable right now)
+### Score it
 
-- **How old is it?** First 1-2 hours is the sweet spot. After 4 hours, skip it.
-- **Engagement velocity** — 20 likes in 10 minutes is a rocket. 20 likes in 4 hours is
-  stalled. Look at the ratio of engagement to tweet age.
-- **Reply-to-like ratio** — high replies relative to likes means the algorithm is actively
-  boosting it. Replies are 27x a like in algorithm weight.
+Use `score_virality` to calculate a score for each candidate. Parse the tweet's metrics
+(replies, retweets, likes, views, age in hours) and the author's data (followers, whether
+they reply back), then call:
+
+```
+score_virality {
+  replies: 250,
+  retweets: 15,
+  likes: 443,
+  views: 53000,
+  age_hours: 4,
+  author_followers: 107900,
+  author_replies_back: false
+}
+```
+
+Returns `{ score, rating, reasoning, breakdown }`. The rating maps to priority:
+- **high** (500+): top priority, write your best reply
+- **medium** (150-499): solid candidate, worth replying
+- **low** (50-149): only if nothing better
+- **skip** (<50): don't bother
+
+The score uses X algorithm weights (reply 13.5x, retweet 20x, bookmark 10x, like 1x),
+exponential time decay (50% every 6h), author reach (log-scaled followers), and a +75
+bonus if the author replies back. Store the score and rating with the tweet in Cortex.
 
 ### Content (your judgment)
+
+The score handles momentum and author reach. You handle content quality:
 
 - **Is it a strong take that invites debate?** Debate generates replies, replies fuel the
   algorithm.
 - **Is it about something trending or breaking?** Trending topics get an algorithmic boost.
-  First-mover takes spread fastest.
 - **Is it novel or surprising?** Unexpected claims generate more engagement than obvious ones.
 - **Does it contain a claim people will challenge or build on?** That's your opening.
 
-### Author (from the enrichment above)
-
-- **Follower count × engagement rate** — a 50k-follower account with 2% engagement puts
-  your reply in front of ~1,000 active people.
-- **Premium / verified?** Premium posts get 2-4x reach. Premium user replies get prioritised
-  to the top of threads.
-- **Does their content historically go viral?** Check their recent timeline.
-- **Will they reply back?** This is worth repeating — the +75 signal makes this the single
-  most important author attribute.
-
-### Rate it
-
-Score each candidate: **high / medium / low** virality potential. Include a one-line
-reasoning. Store both with the tweet so the compose skill can calibrate effort accordingly.
+Use content quality to break ties between candidates with similar scores.
 
 ## Hard Filters — Skip Immediately
 
 - Retweets, quote tweets, or replies to other tweets
-- Older than 4 hours
+- Older than 6 hours (unless exceptional outlier, see Momentum)
 - Spam: crypto giveaways, "DM me", follow-back, airdrops, NFT promos, presales, whitelist
 - Already replied to this account 2-3 times today
 - Already in Cortex (`cortex:search { query: "tid-{tweet_id}" }`)
@@ -164,3 +194,32 @@ work. A medium-virality tweet from an unknown author gets a solid but faster rep
 3-5 strong candidates per session. If nothing good surfaces, say so. Don't force mediocre
 tweets through — bad candidates produce bad replies that hurt your account reputation over
 time.
+
+## Generate Reply Suggestions
+
+After storing candidates, immediately write **5 reply suggestions** for each candidate.
+Don't ask whether to compose — just do it.
+
+For each suggestion, use the full context you've gathered:
+- The tweet content and what it's asking/claiming
+- The author's communication style and what their audience values (from Cortex or research)
+- Our voice profile and past interactions with this author
+- The virality assessment (high-virality tweets deserve your best work)
+
+### Voice rules
+
+Pull the active voice profile from Cortex before writing replies:
+```
+cortex:search { query: "voice-profile active" }
+```
+Follow the banned patterns, good patterns, and tone guidance stored there. The core
+principle: sound like a real person on Twitter, not an AI assistant.
+
+Vary the 5 suggestions across different strategies:
+1. **Add value** — share a specific experience, insight, or example that builds on the tweet
+2. **Contrarian/challenge** — respectfully push back or offer an alternative perspective
+3. **Ask a sharp question** — something that makes the author think and want to respond
+4. **Humor/wit** — a clever observation that's still on-topic
+5. **Signal boost** — agree enthusiastically with a concrete reason why
+
+Present all 5 to the user so they can pick, edit, or riff on their favourite.
