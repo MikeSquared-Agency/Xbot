@@ -181,18 +181,33 @@ a soft-match tweet at 600 clearly wins over a niche-match at 310.
 
 ## Step 7: Know the Author
 
-Don't evaluate a tweet in isolation. Before finalising a candidate, understand who wrote it.
+Don't evaluate a tweet in isolation. Scrape every candidate's author — but only persist
+to Cortex based on source. The graph tracks relationships, not research.
 
-### Check Cortex first
+### Rule: scrape freely, persist conditionally
+
+| Author source | Already in Cortex? | Action |
+|---|---|---|
+| Watchlist | Yes | Use as-is, don't re-scrape |
+| Watchlist | No | Scrape + store now |
+| Home feed / keyword search | Yes | Use as-is, don't re-scrape |
+| Home feed / keyword search | No | Scrape for context, hold in memory only — store if we post |
+
+The reasoning: watchlist authors are curated, we'll encounter them repeatedly, they earn
+a node upfront. Home feed and search authors are one-off finds — most won't make the cut.
+Only the ones we actually reply to earn a place in the graph. Storing happens at post time
+(in compose-tweets), not discovery time.
+
+### Step 7a: Check Cortex
 
 ```
 cortex:search { query: "author @handle" }
 ```
 
 If a rich author node exists (has `bio`, `what_they_work_on`, `communication_style`,
-`responds_to_replies`) — use it as-is. Don't re-scrape known authors.
+`responds_to_replies`) — use it as-is regardless of source. Don't re-scrape known authors.
 
-If the node is missing or sparse, scrape:
+### Step 7b: Scrape (all unknown authors, regardless of source)
 
 ```
 x:get-author-profile { handle: "handle" }
@@ -207,16 +222,17 @@ From profile and recent tweets, form your own understanding of:
 - **Do they engage with replies?** The +75 author-engages-back signal makes this the
   single most important author attribute — more than followers, more than niche fit.
 - **Author type** — classify as one of: `ai_researcher`, `founder`, `developer`,
-  `builder`, `designer`, `investor`, `devrel`. Use your judgment from their bio and
-  content. This is used by analytics to find strategy × author-type patterns.
+  `builder`, `designer`, `investor`, `devrel`. Use your judgment from bio and content.
 
-### Store or update the author
+### Step 7c: Persist (watchlist authors only)
+
+If the author came from the **watchlist**, store them now:
 
 ```
 cortex:store {
   kind: "author",
   title: "{handle}",
-  body: "{\"handle\":\"@handle\",\"display_name\":\"...\",\"bio\":\"...\",\"followers\":12000,\"author_type\":\"developer\",\"what_they_work_on\":\"...\",\"audience_values\":\"...\",\"communication_style\":\"...\",\"responds_to_replies\":true,\"times_we_replied\":0,\"they_replied_back\":0,\"updated_at\":\"...\"}",
+  body: "{\"handle\":\"@handle\",\"display_name\":\"...\",\"bio\":\"...\",\"followers\":12000,\"author_type\":\"developer\",\"what_they_work_on\":\"...\",\"audience_values\":\"...\",\"communication_style\":\"...\",\"responds_to_replies\":true,\"times_we_replied\":0,\"they_replied_back\":0,\"source\":\"watchlist\",\"updated_at\":\"...\"}",
   tags: ["author", "author-{handle}"]
 }
 ```
@@ -224,8 +240,12 @@ cortex:store {
 If the author already has a node, use `cortex:recall` to get the ID, then PATCH rather
 than creating a duplicate.
 
-Re-score with accurate `author_followers` and `author_replies_back` if the initial
-score used fallback values.
+If the author came from the **home feed or keyword search**, hold everything in working
+memory only. Pass the scraped context forward into the tweet candidate's `author_context`
+field — the compose skill will create the node if and when a reply is posted.
+
+Re-score with accurate `author_followers` and `author_replies_back` now that you have
+the full profile data.
 
 ## Step 8: Final Selection
 
@@ -246,7 +266,7 @@ For each selected tweet:
 cortex:store {
   kind: "tweet",
   title: "{tweet_id}",
-  body: "{\"content\":\"...\",\"author_handle\":\"@handle\",\"author_type\":\"developer\",\"tweet_url\":\"...\",\"likes_t0\":892,\"retweets_t0\":45,\"replies_t0\":123,\"views_t0\":53400,\"virality_score\":1240,\"virality_rating\":\"high\",\"niche_match\":\"hard\",\"virality_reasoning\":\"...\",\"author_context\":\"...\",\"discovered_at\":\"...\",\"source\":\"watchlist\"}",
+  body: "{\"content\":\"...\",\"author_handle\":\"@handle\",\"author_type\":\"developer\",\"tweet_url\":\"...\",\"likes_t0\":892,\"retweets_t0\":45,\"replies_t0\":123,\"views_t0\":53400,\"virality_score\":1240,\"virality_rating\":\"high\",\"niche_match\":\"hard\",\"virality_reasoning\":\"...\",\"author_context\":\"...\",\"author_source\":\"watchlist\",\"discovered_at\":\"...\",\"source\":\"watchlist\"}",
   tags: ["tweet", "status-queued", "tid-{tweet_id}", "author-{handle}"]
 }
 ```
@@ -255,8 +275,10 @@ Key fields for downstream skills:
 - `virality_score` and `virality_rating` — how much effort compose should invest
 - `niche_match` — `"hard"` or `"soft"` — context for strategy selection
 - `author_type` — used by analytics for strategy × author-type pattern detection
+- `author_source` — `"watchlist"`, `"home"`, or `"search"` — tells compose whether to
+  create an author node at post time
 - `virality_reasoning` — the score breakdown in plain language
-- `author_context` — a 1–2 sentence summary of the author for the compose skill
+- `author_context` — 1–2 sentence summary plus full scraped context for non-watchlist authors
 
 ## Step 10: Generate Reply Suggestions
 
