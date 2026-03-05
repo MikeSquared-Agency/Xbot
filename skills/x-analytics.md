@@ -11,70 +11,56 @@ description: >
 
 # Echo Analytics Ingestion
 
-Pull X analytics data, score it against the real algorithm weights, and store actionable
-insights into Cortex so the compose process can use them later.
+Pull X analytics data, score it against algorithm weights, run the strategy performance
+audit, and write findings back into Cortex so the compose skill improves over time.
 
 ## Tools
 
 - `x:pull-analytics { days }` — returns raw CSV of post metrics
-- `cortex:store` — persist insight nodes
-- `cortex:search` / `cortex:recall` — check for existing insights before duplicating
+- `cortex:store` / `cortex:recall` / `cortex:search` — read and write Cortex nodes
 
-## Flow
-
-### 1. Pull
+## Step 1: Pull
 
 ```
 x:pull-analytics { days: 7 }
 ```
 
-This returns CSV text with columns like impressions, likes, retweets, replies, bookmarks,
-engagements, profile clicks. Read it directly — don't parse it with code, just read the table.
+Returns CSV text with columns including: impressions, likes, retweets, replies, bookmarks,
+engagements, profile clicks. Read the table directly — don't parse with code.
 
-### 2. Score against algorithm weights
+## Step 2: Score Against Algorithm Weights
 
-X's recommendation algorithm weights engagement very unevenly. A like is not a like. Score
-every post using these weights from X's open-sourced recommendation code:
+X's recommendation algorithm weights engagement very unevenly. Score every post:
 
 | Signal | Weight | Multiplier vs like |
 |--------|--------|--------------------|
 | Reply + author engages back | 75 | 150x |
 | Reply | 13.5 | 27x |
 | Profile visit + engage | 12.0 | 24x |
-| Conversation click + engage | 11.0 | 22x |
-| Dwell time (2+ min) | 10.0 | 20x |
 | Repost | 1.0 | 2x |
 | Like | 0.5 | 1x (baseline) |
 
-Bookmarks are estimated at ~10x (not officially documented).
+Bookmarks estimated at ~10x (not officially documented).
 
-The critical takeaway: a reply that sparks back-and-forth is worth 150x a like. The algorithm
-rewards conversation, not passive engagement. Five replies with author responses outperform
-fifty likes with silence.
+The critical takeaway: a reply that sparks back-and-forth is worth 150x a like. Five
+replies with author responses outperform fifty likes with silence.
 
-### 3. Analyse
+## Step 3: Analyse Own Post Performance
 
-Look at the CSV through the lens of those weights. Focus on:
+Look at the CSV through the lens of those weights:
 
-- **Reply ratio** — which posts generated replies, not just likes? Replies are 27x more
-  valuable. High impressions + low replies means the algorithm won't push it further.
-- **Repost triggers** — reposts are 2x a like but signal shareability. What made someone
-  hit share?
-- **Algorithm gold** — low impressions + high replies means the content resonates but the
-  hook was weak. Fix the hook and you have a winner.
+- **Reply ratio** — which posts generated replies, not just likes? High impressions +
+  low replies means the algorithm won't push it further.
 - **Top performer text** — read the actual words. What topics, formats, hooks, and angles
   appear in the best posts?
-- **Bottom performer text** — what to stop doing. Patterns that get likes but zero replies
-  are actively bad for reach.
-- **Velocity** — engagement in the first 30 minutes is critical. Posts lose ~50% visibility
-  every 6 hours. If a post got engagement late, the content was good but the timing or hook
-  was off.
+- **Bottom performer text** — patterns that get likes but zero replies are bad for reach.
+- **Velocity** — posts lose ~50% visibility every 6 hours. Late engagement = good content,
+  weak hook or timing.
+- **Algorithm gold** — low impressions + high replies = content resonates, hook is weak.
 
-### 4. Store insights into Cortex
+## Step 4: Store General Insights
 
-Store what you learn as `insight` nodes. Be specific and actionable — "posts about AI do
-well" is useless. "Posts that make a specific technical claim with a contrarian angle get
-3-5x more replies than generic observations" is useful.
+Store what you learn as `insight` nodes. Be specific and evidence-backed.
 
 **Weekly digest:**
 
@@ -87,35 +73,134 @@ well" is useless. "Posts that make a specific technical claim with a contrarian 
 }
 ```
 
-The `top_patterns` array should contain specific, evidence-backed observations. The `avoid`
-array is equally important — patterns that look good on vanity metrics but score poorly on
-algorithm weights.
-
 **Individual pattern observations:**
 
 ```json
 {
   "kind": "insight",
-  "title": "insight-specific-numbers-in-replies",
-  "body": "{\"observation\":\"Replies citing a specific number from the original post get 4x more replies than generic responses\",\"evidence\":\"3 of top 5 this week cited numbers\",\"confidence\":\"medium\",\"source\":\"analytics-2025-03-03\"}",
+  "title": "insight-{descriptive-slug}",
+  "body": "{\"observation\":\"Replies citing a specific number from the original post get 4x more replies than generic responses\",\"evidence\":\"3 of top 5 this week cited numbers\",\"confidence\":\"medium\",\"source\":\"analytics-YYYY-MM-DD\"}",
   "tags": ["insight", "compose-pattern"]
 }
 ```
 
-**Target account observations:**
+Before storing, search for existing insights on the same topic and update rather than
+duplicate:
 
-```json
-{
-  "kind": "insight",
-  "title": "target-somehandle",
-  "body": "{\"handle\":\"@somehandle\",\"why\":\"Replies to our replies 60% of the time — triggers the +75 author-engages-back signal\",\"avg_impressions\":1200,\"last_updated\":\"2025-03-03\"}",
-  "tags": ["insight", "target-account"]
-}
+```
+cortex:search { query: "analytics digest" }
 ```
 
-Before storing, search Cortex for existing insights on the same topic and update rather than
-duplicate. Use `cortex:search { query: "analytics digest" }` to check.
+## Step 5: Strategy Performance Audit
 
-### 5. Done
+This step closes the self-improvement loop. Cross-reference reply nodes against outcomes
+to learn which strategies work on which author types.
 
-Insights are in Cortex. A separate compose process will pull them when writing.
+### 5a. Pull reply nodes
+
+```
+cortex:search { query: "reply posted strategy" }
+```
+
+Aim for the last 30 days of replies. Pull enough to find patterns.
+
+### 5b. For each reply node, gather:
+
+- `strategy` tag — which strategy was used
+- `author_type` — the author type at time of reply (stored on the reply node)
+- `author_handle` — to check the author node for reply-back data
+- `virality_rating` — what tier was the original tweet (high/medium/low)
+- `niche_match` — hard or soft niche match
+
+### 5c. Check reply-back outcomes
+
+For each reply, pull the author node:
+
+```
+cortex:search { query: "author @{handle}" }
+```
+
+Compare `they_replied_back` count before and after our reply. If the author has replied
+since our post, that's a positive outcome for this strategy × author-type combination.
+
+Note: `they_replied_back` is a cumulative count — you're looking at whether it increased
+after our reply date. If the timing is ambiguous, note it as uncertain rather than forcing
+an attribution.
+
+### 5d. Group and analyse
+
+Group replies by `strategy` × `author_type`. For each combination with 3+ data points:
+
+- **Reply-back rate** — what % of authors responded to this strategy × author-type combo?
+- **Virality tier distribution** — does the strategy perform differently on high vs. medium
+  virality tweets?
+- **Niche match effect** — do hard-match tweets respond differently than soft-match?
+
+Look for meaningful differences (>15% reply-back rate gap) before calling something a pattern.
+Three data points is the minimum — don't draw conclusions from 1–2 samples.
+
+Examples of actionable patterns worth recording:
+- "contrarian on ai_researcher authors: 4/6 replied back (67%) vs baseline 25%"
+- "question strategy on high-virality tweets: 1/7 replied back — authors too busy"
+- "experience on developer authors consistently drives back-and-forth (5/7, 71%)"
+
+### 5e. Author node updates
+
+If you detect that an author replied back to one of our replies during this period, update
+their author node:
+
+```
+PATCH /nodes/{author_node_id}
+body: { "they_replied_back": incremented_count }
+```
+
+This keeps the author engagement history accurate for future scoring.
+
+## Step 6: Update Playbook Performance Hints
+
+Pull the active playbook:
+
+```
+cortex:search { query: "playbook active" }
+```
+
+Read the current `performance_hint` for each strategy. The hint includes a sample size
+in parentheses — e.g. `"(n=6, medium)"`.
+
+### Update rules
+
+For each strategy where the audit found a pattern:
+
+1. **Only update if new evidence is stronger** — higher n, same or higher confidence.
+   Don't overwrite `(n=8, medium)` with `(n=3, low)`. Do overwrite `(n=3, low)` with
+   `(n=7, medium)`.
+
+2. **Only update if n ≥ 3** — the playbook's `confidence_threshold_for_hint_update` field
+   confirms this. Never update from 1–2 data points.
+
+3. **Be specific in the hint** — include strategy name, author type, reply-back rate, sample
+   size, and confidence level. If the pattern differs by author type, note both directions.
+
+Example hint update:
+```
+"67% reply-back on ai_researcher authors (n=6, medium). Underperforms on founders (20%, n=5, low)."
+```
+
+### Write the update
+
+PATCH the playbook node with the updated body. Only change the `performance_hint` fields
+for strategies where evidence meets the threshold — leave others as-is.
+
+Also update `updated_at` to today's date.
+
+### Surface findings to the user
+
+After updating the playbook, summarise what changed:
+
+- Which strategy hints were updated and why
+- Which patterns had enough evidence to record
+- Which patterns were observed but didn't meet the threshold yet (note n count)
+- Any strong recommendations for the compose skill going forward
+
+This is the moment where you surface strategic insights — not buried in Cortex, but
+clearly communicated so the user understands how the system is improving.

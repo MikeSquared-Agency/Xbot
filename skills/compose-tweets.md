@@ -5,8 +5,9 @@ description: >
   responding to a tweet, engaging with someone's post, composing a response, or posting on X.
   Also trigger when the user says "reply to this", "engage with", "respond to", "post a reply",
   "what should I say to", or references writing tweets. This skill covers the full loop: gather
-  context, write the reply, post it, record it, and follow up. Does NOT cover analytics
-  ingestion — use echo-analytics-ingestion for that.
+  context, write the reply, present it for approval, post it, and record it. Does NOT cover
+  analytics ingestion — use x-analytics for that. Does NOT cover tweet discovery — use
+  research-tweets for that.
 ---
 
 # Echo Reply Compose
@@ -14,103 +15,142 @@ description: >
 Write and post replies on X that generate conversation, not just likes. The algorithm rewards
 replies that spark back-and-forth 150x more than passive engagement.
 
+**Human gate:** This skill always stops before posting to present suggestions for approval.
+The user picks the reply (or edits it). Nothing posts without explicit confirmation.
+
 ## Tools
 
-- `cortex:search` / `cortex:recall` — pull voice profile, insights, recent replies, tweet candidates
+- `cortex:search` / `cortex:recall` — pull voice profile, playbook, insights, tweet candidates
 - `x:post-reply { tweet_url, reply_text }` — post the reply via browser
 - `x:check-session` — verify X session is live before posting
-- `cortex:store` — record the posted reply
+- `cortex:store` / `cortex:relate` — record the posted reply
 
-## Before You Write Anything
+## Step 1: Gather Context
 
-Gather four things from Cortex:
+Pull four things from Cortex before writing anything.
 
 ### 1. The tweet and its author context
-
-The scout skill stores tweet candidates with `virality_assessment`, `virality_reasoning`,
-and `author_context` baked in. Read these — they tell you how much effort to invest and
-what angle will land with this specific author.
 
 ```
 cortex:search { query: "tweet status-queued" }
 ```
 
-For deeper author understanding, pull their full author node:
+The tweet node contains `virality_rating`, `niche_match`, `virality_reasoning`,
+`author_context`, and `author_type` — stored by the scout skill. These tell you how
+much effort to invest and what angle will land.
+
+For deeper author context:
 
 ```
 cortex:search { query: "author @handle" }
 ```
 
-This has what they work on, what their audience values, their communication style, and
-critically — whether they reply back to you. If `they_replied_back` is high relative to
-`times_we_replied`, invest heavily. Every back-and-forth triggers the +75 signal.
+The author node has `communication_style`, `responds_to_replies`, `they_replied_back`,
+and `times_we_replied`. If `they_replied_back` is high relative to `times_we_replied`,
+invest heavily — every back-and-forth triggers the +75 signal.
 
 ### 2. Voice profile
 
 ```
-cortex:search { query: "voice profile active" }
+cortex:search { query: "voice-profile active" }
 ```
 
-The voice profile is a `voice_profile` node with tag `active`. It contains tone, vocabulary,
-sentence structure, hooks, personality markers. Internalise it — every reply should sound
-like this person, not like a generic AI.
+Contains tone, vocabulary, sentence structure, hooks, personality markers, and banned
+patterns. Internalise it completely — every reply must sound like this person, not
+like a generic AI.
 
 If no voice profile exists, fall back to: concise, technical, opinionated, no filler.
 
-### 3. Analytics insights
+### 3. Playbook
+
+```
+cortex:search { query: "playbook active" }
+```
+
+Contains the five strategies with `description`, `best_when`, `avoid_when`, and
+`performance_hint`. The `performance_hint` field is populated by the analytics skill
+as it learns which strategies work on which author types. Read these hints — they
+reflect real outcome data, not defaults.
+
+### 4. Analytics insights + recent replies
 
 ```
 cortex:search { query: "compose pattern insight" }
-cortex:search { query: "analytics digest weekly" }
-```
-
-These are `insight` nodes stored by the analytics ingestion skill. They contain what's
-working (hook patterns, topics, structural patterns) and what to avoid. Apply them.
-
-### 4. Recent replies
-
-```
 cortex:search { query: "reply posted recent" }
 ```
 
-Check recent `reply` nodes to avoid repeating yourself. If you used a contrarian angle on
-the last three replies, switch it up. Also check you haven't already replied to this author
-too many times today (2-3 max).
+Insights tell you what's working (hook patterns, topics, structures). Recent replies
+prevent repetition — if you used contrarian three times in a row, switch it up. Also
+check you haven't replied to this author too many times today (2–3 max).
 
-## Writing the Reply
+## Step 2: Select Strategy
 
-### Strategy selection
+Pick the strategy that fits the tweet AND the author. Three inputs:
 
-Pick the strategy that fits the tweet AND the author. What you know about the author from
-the scout data should directly influence your approach — if they respond well to pushback,
-go contrarian. If they engage with questions, ask one.
+1. **Tweet content** — what does this tweet call for? A strong claim invites contrarian.
+   A question invites experience or additive. An insight invites additive or question.
 
-- **Contrarian** — disagree with a specific, reasoned counter-take. Best when the tweet makes a strong claim and the author respects pushback.
-- **Experience** — "We built X and found..." Share a real-world data point. Best when the topic overlaps with your domain and the author values practitioner credibility.
-- **Additive** — build on their point with something they missed. Best when the tweet is good but incomplete, and the author engages with depth.
-- **Question** — ask something specific and thought-provoking. Best when the author actively responds to replies (directly triggers the +75 signal).
-- **Pattern interrupt** — unexpected reframing or cross-domain connection. Best when the author appreciates novelty and you can genuinely surprise.
+2. **Author context** — `communication_style` and `responds_to_replies` from the author
+   node. If they never respond, avoid question. If they engage with pushback, consider
+   contrarian.
 
-Don't force a strategy. If none fits the tweet + author combination, skip it.
+3. **Performance hints** — check `performance_hint` on each playbook strategy. If a hint
+   says "contrarian underperforms on founders (n=8)", don't use contrarian on a founder
+   unless the tweet is an unusually strong fit. Hints are advisory, not overrides.
 
-### Reply rules
+Cross-reference the `author_type` from the tweet node against hints — hints are
+more useful when the author type matches.
 
-- **Max 280 characters.** Shorter is almost always better. Under 120 chars tends to perform best.
-- **Add genuine value.** Insight, experience, a contrarian angle, or a specific question. Never "Great post!", "This is so true", "Couldn't agree more", or any variant.
-- **Reference specific details from the tweet.** Prove you read it. Generic replies get ignored.
-- **Match or slightly elevate the author's technical level.** Don't talk down, don't over-jargon.
-- **Write in the voice profile's style.** Use their vocabulary, sentence structure, personality markers. Not yours.
-- **Cite specific numbers when possible.** Replies containing a concrete metric or data point consistently outperform vague ones.
+Don't force a strategy. If none genuinely fits the tweet + author combination, say so.
 
-### What not to do
+## Step 3: Write 5 Suggestions
 
-- No hashtags (they hurt reach for replies)
-- No @-mentioning other accounts in the reply (looks spammy)
-- Nothing that could trigger reports — one report is -369x, which wipes out hundreds of likes. Be provocative enough to spark debate, never enough to offend.
-- No threads as replies (single tweet only)
-- Don't reply to the same account more than 2-3 times per day (looks like stalking)
+Write one suggestion per strategy. Even if one strategy is clearly strongest, write all
+five — the user may see something you don't.
 
-## Posting
+For each suggestion:
+- Max 280 characters. Under 120 is almost always better.
+- Reference something specific from the tweet — prove you read it.
+- Match or slightly elevate the author's technical level.
+- Apply voice profile vocabulary, sentence structure, and personality markers.
+- Cite a specific number or concrete detail if possible.
+- Follow the playbook hard rules.
+
+What not to do (from playbook hard rules):
+- No hashtags
+- No @-mentioning other accounts
+- No generic affirmations ("Great post!", "This is so true")
+- No threads
+- Nothing that could trigger a report
+
+## Step 4: Present for Approval — STOP HERE
+
+Present the suggestions clearly before doing anything else. Format:
+
+---
+**Tweet:** [tweet content, truncated if long]
+**Author:** @handle ([author_type]) — [responds_to_replies: yes/no], replied back [X/Y] times
+
+**Suggestions:**
+
+1. **contrarian** — [reply text]
+2. **experience** — [reply text]
+3. **additive** — [reply text]
+4. **question** — [reply text]
+5. **pattern_interrupt** — [reply text]
+
+**Recommended:** #[N] ([strategy name]) — [one sentence on why, referencing performance hint if relevant]
+---
+
+Wait for the user to:
+- Pick a number (1–5)
+- Edit one of the suggestions
+- Provide their own text to post instead
+- Say skip/pass to drop this candidate
+
+Do not proceed to posting until you have explicit confirmation of what to post.
+
+## Step 5: Post
 
 ### 1. Check session
 
@@ -118,31 +158,66 @@ Don't force a strategy. If none fits the tweet + author combination, skip it.
 x:check-session
 ```
 
-If not authenticated, stop and tell the user to log in.
+If not authenticated, stop and tell the user.
 
-### 2. Post
+### 2. Post the approved reply
 
 ```
-x:post-reply { tweet_url: "https://x.com/author/status/123", reply_text: "your reply" }
+x:post-reply {
+  tweet_url: "https://x.com/author/status/123",
+  reply_text: "the approved reply text"
+}
 ```
 
-This returns `{ reply_id, reply_url }` on success.
+Returns `{ reply_id, reply_url }` on success.
 
-### 3. Record in Cortex
+## Step 6: Record in Cortex
 
-After posting, store the reply so analytics can track it later:
+Store the reply immediately after posting:
 
 ```
 cortex:store {
   kind: "reply",
   title: "reply-{tweet_id}-{timestamp}",
-  body: "{\"tweet_id\":\"...\",\"reply_text\":\"...\",\"strategy\":\"contrarian\",\"posted_at\":\"...\",\"reply_id\":\"...\",\"reply_url\":\"...\",\"author_handle\":\"@target\"}",
-  tags: ["reply", "tweet-{tweet_id}", "strategy-{strategy}"]
+  body: "{\"tweet_id\":\"...\",\"reply_text\":\"...\",\"strategy\":\"contrarian\",\"author_handle\":\"@handle\",\"author_type\":\"developer\",\"posted_at\":\"...\",\"reply_id\":\"...\",\"reply_url\":\"...\",\"virality_rating\":\"high\",\"niche_match\":\"hard\"}",
+  tags: ["reply", "tweet-{tweet_id}", "strategy-{strategy}", "author-type-{author_type}"]
 }
 ```
 
 Then create the edge:
 
 ```
-cortex:relate { from_id: reply_node_id, to_id: tweet_node_id, relation: "reply_to" }
+cortex:relate {
+  from_id: reply_node_id,
+  to_id: tweet_node_id,
+  relation: "reply_to"
+}
 ```
+
+Critical fields for analytics:
+- `strategy` — the strategy actually used (not just generated), drives performance audit
+- `author_type` — from the tweet/author node, enables strategy × author-type pattern detection
+- `virality_rating` — used to correlate strategy performance with tweet quality
+- `niche_match` — `"hard"` or `"soft"`, context for evaluating outcomes
+
+### Update author interaction count
+
+Pull the author node and increment `times_we_replied`:
+
+```
+cortex:recall { query: "author @handle" }
+```
+
+PATCH the node with `times_we_replied` incremented by 1. Do not reset `they_replied_back`
+— that only gets updated when the analytics skill detects an actual reply from the author.
+
+## Step 7: Mark Tweet as Replied
+
+Update the tweet node status tag. Pull the tweet node ID, then PATCH:
+
+```
+PATCH /nodes/{tweet_id}
+body: { "tags": updated to replace "status-queued" with "status-replied" }
+```
+
+This prevents the scout skill from re-queuing the same tweet.
