@@ -1,0 +1,39 @@
+version: "3.8"
+
+services:
+  surrealdb:
+    image: surrealdb/surrealdb:v2.2.1
+    command: start --user root --pass root --bind 0.0.0.0:8000 file:/data/faultline.db
+    ports:
+      - "8000:8000"
+    volumes:
+      - surreal_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      - SURREAL_URL=ws://surrealdb:8000/rpc
+      - SURREAL_USER=root
+      - SURREAL_PASS=root
+      - SURREAL_NS=faultline
+      - SURREAL_DB=faultline
+    depends_on:
+      surrealdb:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8080 --reload
+
+volumes:
+  surreal_data:

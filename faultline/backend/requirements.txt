@@ -1,0 +1,13 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.3
+pydantic-settings==2.7.0
+surrealdb==1.0.6
+langchain==0.3.14
+langchain-anthropic==0.3.5
+langgraph==0.2.62
+opik==1.7.5
+python-dotenv==1.0.1
+httpx==0.28.1
+pytest==8.3.4
+pytest-asyncio==0.24.0
