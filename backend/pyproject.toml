@@ -1,0 +1,20 @@
+[project]
+name = "faultline-backend"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "surrealdb>=0.4.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "integration: requires a running SurrealDB instance (deselect with '-m not integration')",
+]
