@@ -428,6 +428,319 @@ function addPlaywrightExtractionVar(lines, locatorExpr, extractMode, varName, at
 // --- Workflow translation ---
 
 /**
+ * Translate a single workflow step into Playwright code lines.
+ * Extracted from translateWorkflow so that nested step types (if, retry)
+ * can recursively translate their child steps.
+ *
+ * @param {object} step — the step definition from the workflow
+ * @param {string[]} lines — output code lines (mutated)
+ * @param {Set<string>} vars — variable names declared by steps (mutated)
+ * @param {object} args — tool invocation arguments
+ */
+function translateStep(step, lines, vars, args) {
+  switch (step.action) {
+    case 'navigate': {
+      let url = step.url || step.urlTemplate || '';
+
+      // Compute params (date offsets, etc.)
+      if (step.computeParams) {
+        for (const [paramName, spec] of Object.entries(step.computeParams)) {
+          if (spec.type === 'dateOffset') {
+            const fieldName = spec.field || 'days';
+            const defaultVal = spec.default || 1;
+            const argVal = args[fieldName] !== undefined ? args[fieldName] : defaultVal;
+            // Compute date: today minus offset days
+            // offset expression like "-(days-1)" means go back (days-1) days
+            const offsetDays = argVal - 1;
+            lines.push(`  { const _d = new Date(); _d.setDate(_d.getDate() - ${offsetDays});`);
+            lines.push(`    var ${paramName} = _d.toISOString().split('T')[0]; }`);
+            vars.add(paramName);
+          } else if (spec.type === 'today') {
+            lines.push(`  var ${paramName} = new Date().toISOString().split('T')[0];`);
+            vars.add(paramName);
+          }
+        }
+      }
+
+      // Substitute {paramName} in URL template
+      if (step.urlTemplate) {
+        // Replace {param} with arg values or computed vars
+        let urlExpr = JSON.stringify(step.urlTemplate);
+        // Find all {param} placeholders
+        const placeholders = step.urlTemplate.match(/\{(\w+)\}/g) || [];
+        if (placeholders.length > 0) {
+          // Build URL via template literal
+          let templateUrl = step.urlTemplate;
+          for (const ph of placeholders) {
+            const paramName = ph.slice(1, -1);
+            templateUrl = templateUrl.replace(ph, '${' + paramName + '}');
+          }
+          // Resolve non-computed params from args
+          for (const ph of placeholders) {
+            const paramName = ph.slice(1, -1);
+            if (!vars.has(paramName) && args[paramName] !== undefined) {
+              lines.push(`  var ${paramName} = ${JSON.stringify(String(args[paramName]))};`);
+              vars.add(paramName);
+            }
+          }
+          urlExpr = '`' + templateUrl.replace(/\\/g, '\\\\').replace(/`/g, '\\`') + '`';
+        }
+        lines.push(`  await page.goto(${urlExpr});`);
+      } else {
+        // Simple URL with {param} substitution from args
+        for (const [key, val] of Object.entries(args)) {
+          url = url.replace(`{${key}}`, String(val));
+        }
+        lines.push(`  await page.goto(${JSON.stringify(url)});`);
+      }
+      break;
+    }
+
+    case 'waitForLoadState': {
+      const state = step.state || 'networkidle';
+      const timeout = step.timeout || 15000;
+      lines.push(`  await page.waitForLoadState(${JSON.stringify(state)}, { timeout: ${timeout} }).catch(() => {});`);
+      break;
+    }
+
+    case 'wait': {
+      const sel = step.selector;
+      const timeout = step.timeout || 10000;
+      if (sel) {
+        lines.push(`  await page.locator(${JSON.stringify(sel)}).first().waitFor({ state: 'visible', timeout: ${timeout} }).catch(() => {});`);
+      }
+      break;
+    }
+
+    case 'click': {
+      if (step.humanLike) {
+        lines.push(generateHumanMouseCode(selectorToLocator(step.selector)));
+        break;
+      }
+      const selectors = [step.selector, ...(step.fallbackSelectors || [])].filter(Boolean);
+      lines.push(`  {`);
+      lines.push(`    const _sels = ${JSON.stringify(selectors)};`);
+      lines.push(`    let _clicked = false;`);
+      lines.push(`    for (const _sel of _sels) {`);
+      lines.push(`      const _loc = page.locator(_sel).first();`);
+      lines.push(`      const _vis = await _loc.isVisible({ timeout: 1000 }).catch(() => false);`);
+      lines.push(`      if (_vis) { await _loc.click(); _clicked = true; break; }`);
+      lines.push(`    }`);
+      lines.push(`    if (!_clicked) throw new Error('click: no matching selector found');`);
+      lines.push(`  }`);
+      break;
+    }
+
+    case 'download': {
+      const selectors = [step.selector, ...(step.fallbackSelectors || [])].filter(Boolean);
+      lines.push(`  {`);
+      lines.push(`    const _sels = ${JSON.stringify(selectors)};`);
+      lines.push(`    let _exportBtn = null;`);
+      lines.push(`    for (const _sel of _sels) {`);
+      lines.push(`      const _loc = page.locator(_sel).first();`);
+      lines.push(`      const _vis = await _loc.isVisible({ timeout: 1000 }).catch(() => false);`);
+      lines.push(`      if (_vis) { _exportBtn = _loc; break; }`);
+      lines.push(`    }`);
+      lines.push(`    if (!_exportBtn) throw new Error('download: could not find download button');`);
+      lines.push(`    const [_dl] = await Promise.all([`);
+      lines.push(`      page.waitForEvent('download', { timeout: 30000 }),`);
+      lines.push(`      _exportBtn.click(),`);
+      lines.push(`    ]);`);
+      lines.push(`    const _dlPath = await _dl.path();`);
+      lines.push(`    if (!_dlPath) throw new Error('download: no file path received');`);
+      if (step.returnContent) {
+        lines.push(`    return { downloadPath: _dlPath, filename: _dl.suggestedFilename() };`);
+      } else {
+        lines.push(`    var _downloadPath = _dlPath;`);
+        lines.push(`    var _downloadFilename = _dl.suggestedFilename();`);
+      }
+      lines.push(`  }`);
+      break;
+    }
+
+    case 'checkUrl': {
+      const varName = step.resultField || 'checkResult';
+      const patterns = step.patterns || [];
+      const titlePatterns = step.titlePatterns || [];
+      vars.add(varName);
+
+      lines.push(`  var ${varName};`);
+      lines.push(`  {`);
+      lines.push(`    const _url = page.url();`);
+      lines.push(`    const _title = await page.title();`);
+
+      const urlChecks = patterns.map(p => `_url.includes(${JSON.stringify(p)})`);
+      const titleChecks = titlePatterns.map(p => `_title.toLowerCase().includes(${JSON.stringify(p.toLowerCase())})`);
+      const allChecks = [...urlChecks, ...titleChecks];
+
+      lines.push(`    ${varName} = ${allChecks.join(' || ') || 'false'};`);
+      lines.push(`  }`);
+      break;
+    }
+
+    case 'scroll': {
+      const distance = step.distance || 800;
+      const count = step.count || 1;
+      const delay = step.delay || 1000;
+      for (let i = 0; i < count; i++) {
+        lines.push(`  await page.evaluate(() => window.scrollBy(0, ${distance}));`);
+        lines.push(`  await page.waitForTimeout(${delay});`);
+      }
+      if (step.waitForLoadState) {
+        lines.push(`  await page.waitForLoadState(${JSON.stringify(step.waitForLoadState)}, { timeout: ${step.timeout || 10000} }).catch(() => {});`);
+      }
+      break;
+    }
+
+    case 'extract': {
+      const sel = step.selector;
+      const mode = step.extractMode || 'text';
+      const into = step.into; // optional: store into variable instead of returning
+      const cssSel = selectorToCss(sel);
+
+      // recordList: structured extraction with per-element sub-fields
+      if (mode === 'recordList' && step.fields) {
+        const locatorExpr = selectorToLocator(sel);
+        const fieldsJson = JSON.stringify(step.fields);
+        if (into) {
+          vars.add(into);
+          lines.push(`  var ${into} = await ${locatorExpr}.evaluateAll(function(els, _fields) {`);
+        } else {
+          lines.push(`  var results = await ${locatorExpr}.evaluateAll(function(els, _fields) {`);
+        }
+        lines.push(`    return els.map(function(el) {`);
+        lines.push(`      var rec = {};`);
+        lines.push(`      for (var i = 0; i < _fields.length; i++) {`);
+        lines.push(`        var f = _fields[i];`);
+        lines.push(`        var target = f.subSelector ? el.querySelector(f.subSelector) : el;`);
+        lines.push(`        if (!target) { rec[f.name] = null; continue; }`);
+        lines.push(`        if (f.extract === 'attribute') rec[f.name] = target.getAttribute(f.attribute || 'href');`);
+        lines.push(`        else if (f.extract === 'innerText') rec[f.name] = target.innerText;`);
+        lines.push(`        else rec[f.name] = target.textContent ? target.textContent.trim() : null;`);
+        lines.push(`      }`);
+        lines.push(`      return rec;`);
+        lines.push(`    });`);
+        lines.push(`  }, ${fieldsJson});`);
+        if (!into) {
+          lines.push(`  return { results };`);
+        }
+        break;
+      }
+
+      if (into) {
+        // Store extraction result into a variable (no return)
+        vars.add(into);
+        if (cssSel) {
+          addDomExtractionVar(lines, cssSel, mode, into, step.attribute);
+        } else if (sel) {
+          addPlaywrightExtractionVar(lines, selectorToLocator(sel), mode, into, step.attribute);
+        }
+      } else {
+        if (cssSel) {
+          addDomExtraction(lines, cssSel, mode, step.attribute, step.extractAttributes);
+        } else if (sel) {
+          const locatorExpr = selectorToLocator(sel);
+          addPlaywrightExtraction(lines, locatorExpr, mode, step.attribute, step.extractAttributes);
+        }
+      }
+      break;
+    }
+
+    case 'fill': {
+      const sel = step.selector;
+      const paramName = step.param || step.name;
+      const value = paramName ? args[paramName] : step.value;
+      if (value !== undefined && value !== null && sel) {
+        const locator = selectorToLocator(sel);
+        lines.push(`  await ${locator}.first().fill(${JSON.stringify(String(value))});`);
+      }
+      break;
+    }
+
+    case 'assertVisible': {
+      const varName = step.into || 'assertResult';
+      vars.add(varName);
+      const sel = step.selector;
+      const timeout = step.timeout || 2000;
+      lines.push(`  var ${varName} = await page.locator(${JSON.stringify(sel)}).first().isVisible({ timeout: ${timeout} }).catch(() => false);`);
+      break;
+    }
+
+    case 'if': {
+      const cond = step.condition;
+      // Support negation with "!" prefix
+      const condExpr = cond.startsWith('!') ? `!${cond.slice(1)}` : cond;
+      lines.push(`  if (${condExpr}) {`);
+      if (step.then) {
+        for (const thenStep of step.then) {
+          translateStep(thenStep, lines, vars, args);
+        }
+      }
+      if (step.else) {
+        lines.push(`  } else {`);
+        for (const elseStep of step.else) {
+          translateStep(elseStep, lines, vars, args);
+        }
+      }
+      lines.push(`  }`);
+      break;
+    }
+
+    case 'retry': {
+      const max = step.maxAttempts || 3;
+      const delayMs = step.delayMs || 1000;
+      const retryVar = `_retry_${Math.random().toString(36).slice(2, 8)}`;
+      lines.push(`  for (let ${retryVar} = 0; ${retryVar} < ${max}; ${retryVar}++) {`);
+      lines.push(`    try {`);
+      if (step.steps) {
+        for (const retryStep of step.steps) {
+          translateStep(retryStep, lines, vars, args);
+        }
+      }
+      lines.push(`      break; // success, exit retry loop`);
+      lines.push(`    } catch (_e) {`);
+      lines.push(`      if (${retryVar} === ${max - 1}) throw _e;`);
+      lines.push(`      await page.waitForTimeout(${delayMs});`);
+      lines.push(`    }`);
+      lines.push(`  }`);
+      break;
+    }
+
+    case 'return': {
+      const retVal = step.value;
+      if (!retVal) {
+        lines.push(`  return { success: true };`);
+        break;
+      }
+
+      // Build return object with variable substitution
+      // $url → page.url(), $title → page.title()
+      // !varName → negation of a variable
+      // varName → value of a variable
+      const entries = [];
+      for (const [key, expr] of Object.entries(retVal)) {
+        if (expr === '$url') {
+          entries.push(`${JSON.stringify(key)}: page.url()`);
+        } else if (expr === '$title') {
+          entries.push(`${JSON.stringify(key)}: await page.title()`);
+        } else if (typeof expr === 'string' && expr.startsWith('!')) {
+          entries.push(`${JSON.stringify(key)}: !${expr.slice(1)}`);
+        } else if (typeof expr === 'string' && vars.has(expr)) {
+          entries.push(`${JSON.stringify(key)}: ${expr}`);
+        } else {
+          entries.push(`${JSON.stringify(key)}: ${JSON.stringify(expr)}`);
+        }
+      }
+      lines.push(`  return { ${entries.join(', ')} };`);
+      break;
+    }
+
+    default:
+      lines.push(`  // Unknown step action: ${step.action}`);
+  }
+}
+
+/**
  * Translate a workflow-type execution into Playwright code.
  * Workflow executions have { type: 'workflow', steps: [...] } and support
  * multi-step browser automation (navigate, click, download, extract, etc.).
@@ -448,257 +761,7 @@ function translateWorkflow(action, args) {
   const vars = new Set();
 
   for (const step of steps) {
-    switch (step.action) {
-      case 'navigate': {
-        let url = step.url || step.urlTemplate || '';
-
-        // Compute params (date offsets, etc.)
-        if (step.computeParams) {
-          for (const [paramName, spec] of Object.entries(step.computeParams)) {
-            if (spec.type === 'dateOffset') {
-              const fieldName = spec.field || 'days';
-              const defaultVal = spec.default || 1;
-              const argVal = args[fieldName] !== undefined ? args[fieldName] : defaultVal;
-              // Compute date: today minus offset days
-              // offset expression like "-(days-1)" means go back (days-1) days
-              const offsetDays = argVal - 1;
-              lines.push(`  { const _d = new Date(); _d.setDate(_d.getDate() - ${offsetDays});`);
-              lines.push(`    var ${paramName} = _d.toISOString().split('T')[0]; }`);
-              vars.add(paramName);
-            } else if (spec.type === 'today') {
-              lines.push(`  var ${paramName} = new Date().toISOString().split('T')[0];`);
-              vars.add(paramName);
-            }
-          }
-        }
-
-        // Substitute {paramName} in URL template
-        if (step.urlTemplate) {
-          // Replace {param} with arg values or computed vars
-          let urlExpr = JSON.stringify(step.urlTemplate);
-          // Find all {param} placeholders
-          const placeholders = step.urlTemplate.match(/\{(\w+)\}/g) || [];
-          if (placeholders.length > 0) {
-            // Build URL via template literal
-            let templateUrl = step.urlTemplate;
-            for (const ph of placeholders) {
-              const paramName = ph.slice(1, -1);
-              templateUrl = templateUrl.replace(ph, '${' + paramName + '}');
-            }
-            // Resolve non-computed params from args
-            for (const ph of placeholders) {
-              const paramName = ph.slice(1, -1);
-              if (!vars.has(paramName) && args[paramName] !== undefined) {
-                lines.push(`  var ${paramName} = ${JSON.stringify(String(args[paramName]))};`);
-                vars.add(paramName);
-              }
-            }
-            urlExpr = '`' + templateUrl.replace(/\\/g, '\\\\').replace(/`/g, '\\`') + '`';
-          }
-          lines.push(`  await page.goto(${urlExpr});`);
-        } else {
-          // Simple URL with {param} substitution from args
-          for (const [key, val] of Object.entries(args)) {
-            url = url.replace(`{${key}}`, String(val));
-          }
-          lines.push(`  await page.goto(${JSON.stringify(url)});`);
-        }
-        break;
-      }
-
-      case 'waitForLoadState': {
-        const state = step.state || 'networkidle';
-        const timeout = step.timeout || 15000;
-        lines.push(`  await page.waitForLoadState(${JSON.stringify(state)}, { timeout: ${timeout} }).catch(() => {});`);
-        break;
-      }
-
-      case 'wait': {
-        const sel = step.selector;
-        const timeout = step.timeout || 10000;
-        if (sel) {
-          lines.push(`  await page.locator(${JSON.stringify(sel)}).first().waitFor({ state: 'visible', timeout: ${timeout} }).catch(() => {});`);
-        }
-        break;
-      }
-
-      case 'click': {
-        if (step.humanLike) {
-          lines.push(generateHumanMouseCode(selectorToLocator(step.selector)));
-          break;
-        }
-        const selectors = [step.selector, ...(step.fallbackSelectors || [])].filter(Boolean);
-        lines.push(`  {`);
-        lines.push(`    const _sels = ${JSON.stringify(selectors)};`);
-        lines.push(`    let _clicked = false;`);
-        lines.push(`    for (const _sel of _sels) {`);
-        lines.push(`      const _loc = page.locator(_sel).first();`);
-        lines.push(`      const _vis = await _loc.isVisible({ timeout: 1000 }).catch(() => false);`);
-        lines.push(`      if (_vis) { await _loc.click(); _clicked = true; break; }`);
-        lines.push(`    }`);
-        lines.push(`    if (!_clicked) throw new Error('click: no matching selector found');`);
-        lines.push(`  }`);
-        break;
-      }
-
-      case 'download': {
-        const selectors = [step.selector, ...(step.fallbackSelectors || [])].filter(Boolean);
-        lines.push(`  {`);
-        lines.push(`    const _sels = ${JSON.stringify(selectors)};`);
-        lines.push(`    let _exportBtn = null;`);
-        lines.push(`    for (const _sel of _sels) {`);
-        lines.push(`      const _loc = page.locator(_sel).first();`);
-        lines.push(`      const _vis = await _loc.isVisible({ timeout: 1000 }).catch(() => false);`);
-        lines.push(`      if (_vis) { _exportBtn = _loc; break; }`);
-        lines.push(`    }`);
-        lines.push(`    if (!_exportBtn) throw new Error('download: could not find download button');`);
-        lines.push(`    const [_dl] = await Promise.all([`);
-        lines.push(`      page.waitForEvent('download', { timeout: 30000 }),`);
-        lines.push(`      _exportBtn.click(),`);
-        lines.push(`    ]);`);
-        lines.push(`    const _dlPath = await _dl.path();`);
-        lines.push(`    if (!_dlPath) throw new Error('download: no file path received');`);
-        if (step.returnContent) {
-          lines.push(`    return { downloadPath: _dlPath, filename: _dl.suggestedFilename() };`);
-        } else {
-          lines.push(`    var _downloadPath = _dlPath;`);
-          lines.push(`    var _downloadFilename = _dl.suggestedFilename();`);
-        }
-        lines.push(`  }`);
-        break;
-      }
-
-      case 'checkUrl': {
-        const varName = step.resultField || 'checkResult';
-        const patterns = step.patterns || [];
-        const titlePatterns = step.titlePatterns || [];
-        vars.add(varName);
-
-        lines.push(`  var ${varName};`);
-        lines.push(`  {`);
-        lines.push(`    const _url = page.url();`);
-        lines.push(`    const _title = await page.title();`);
-
-        const urlChecks = patterns.map(p => `_url.includes(${JSON.stringify(p)})`);
-        const titleChecks = titlePatterns.map(p => `_title.toLowerCase().includes(${JSON.stringify(p.toLowerCase())})`);
-        const allChecks = [...urlChecks, ...titleChecks];
-
-        lines.push(`    ${varName} = ${allChecks.join(' || ') || 'false'};`);
-        lines.push(`  }`);
-        break;
-      }
-
-      case 'scroll': {
-        const distance = step.distance || 800;
-        const count = step.count || 1;
-        const delay = step.delay || 1000;
-        for (let i = 0; i < count; i++) {
-          lines.push(`  await page.evaluate(() => window.scrollBy(0, ${distance}));`);
-          lines.push(`  await page.waitForTimeout(${delay});`);
-        }
-        if (step.waitForLoadState) {
-          lines.push(`  await page.waitForLoadState(${JSON.stringify(step.waitForLoadState)}, { timeout: ${step.timeout || 10000} }).catch(() => {});`);
-        }
-        break;
-      }
-
-      case 'extract': {
-        const sel = step.selector;
-        const mode = step.extractMode || 'text';
-        const into = step.into; // optional: store into variable instead of returning
-        const cssSel = selectorToCss(sel);
-
-        // recordList: structured extraction with per-element sub-fields
-        if (mode === 'recordList' && step.fields) {
-          const locatorExpr = selectorToLocator(sel);
-          const fieldsJson = JSON.stringify(step.fields);
-          if (into) {
-            vars.add(into);
-            lines.push(`  var ${into} = await ${locatorExpr}.evaluateAll(function(els, _fields) {`);
-          } else {
-            lines.push(`  var results = await ${locatorExpr}.evaluateAll(function(els, _fields) {`);
-          }
-          lines.push(`    return els.map(function(el) {`);
-          lines.push(`      var rec = {};`);
-          lines.push(`      for (var i = 0; i < _fields.length; i++) {`);
-          lines.push(`        var f = _fields[i];`);
-          lines.push(`        var target = f.subSelector ? el.querySelector(f.subSelector) : el;`);
-          lines.push(`        if (!target) { rec[f.name] = null; continue; }`);
-          lines.push(`        if (f.extract === 'attribute') rec[f.name] = target.getAttribute(f.attribute || 'href');`);
-          lines.push(`        else if (f.extract === 'innerText') rec[f.name] = target.innerText;`);
-          lines.push(`        else rec[f.name] = target.textContent ? target.textContent.trim() : null;`);
-          lines.push(`      }`);
-          lines.push(`      return rec;`);
-          lines.push(`    });`);
-          lines.push(`  }, ${fieldsJson});`);
-          if (!into) {
-            lines.push(`  return { results };`);
-          }
-          break;
-        }
-
-        if (into) {
-          // Store extraction result into a variable (no return)
-          vars.add(into);
-          if (cssSel) {
-            addDomExtractionVar(lines, cssSel, mode, into, step.attribute);
-          } else if (sel) {
-            addPlaywrightExtractionVar(lines, selectorToLocator(sel), mode, into, step.attribute);
-          }
-        } else {
-          if (cssSel) {
-            addDomExtraction(lines, cssSel, mode, step.attribute, step.extractAttributes);
-          } else if (sel) {
-            const locatorExpr = selectorToLocator(sel);
-            addPlaywrightExtraction(lines, locatorExpr, mode, step.attribute, step.extractAttributes);
-          }
-        }
-        break;
-      }
-
-      case 'fill': {
-        const sel = step.selector;
-        const paramName = step.param || step.name;
-        const value = paramName ? args[paramName] : step.value;
-        if (value !== undefined && value !== null && sel) {
-          const locator = selectorToLocator(sel);
-          lines.push(`  await ${locator}.first().fill(${JSON.stringify(String(value))});`);
-        }
-        break;
-      }
-
-      case 'return': {
-        const retVal = step.value;
-        if (!retVal) {
-          lines.push(`  return { success: true };`);
-          break;
-        }
-
-        // Build return object with variable substitution
-        // $url → page.url(), $title → page.title()
-        // !varName → negation of a variable
-        // varName → value of a variable
-        const entries = [];
-        for (const [key, expr] of Object.entries(retVal)) {
-          if (expr === '$url') {
-            entries.push(`${JSON.stringify(key)}: page.url()`);
-          } else if (expr === '$title') {
-            entries.push(`${JSON.stringify(key)}: await page.title()`);
-          } else if (typeof expr === 'string' && expr.startsWith('!')) {
-            entries.push(`${JSON.stringify(key)}: !${expr.slice(1)}`);
-          } else if (typeof expr === 'string' && vars.has(expr)) {
-            entries.push(`${JSON.stringify(key)}: ${expr}`);
-          } else {
-            entries.push(`${JSON.stringify(key)}: ${JSON.stringify(expr)}`);
-          }
-        }
-        lines.push(`  return { ${entries.join(', ')} };`);
-        break;
-      }
-
-      default:
-        lines.push(`  // Unknown step action: ${step.action}`);
-    }
+    translateStep(step, lines, vars, args);
   }
 
   // If no explicit return step, add default
@@ -910,6 +973,7 @@ function translateAction(action, args) {
 module.exports = {
   translateAction,
   translateWorkflow,
+  translateStep,
   selectorToLocator,
   selectorToCss,
   isPlaywrightSelector,
