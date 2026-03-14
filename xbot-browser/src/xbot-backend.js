@@ -433,11 +433,33 @@ ${toolList}
           const fallbackCode = translateAction({ execution: fallbackExecution, params }, resolvedArgs);
           const fallbackResult = await this._inner.callTool('browser_run_code', { code: fallbackCode }, progress);
           if (!fallbackResult.isError) {
-            // Fallback succeeded — reset failure count
-            if (tool.id && tool.failure_count > 0) {
-              await this._store.resetFailureCount(tool.id);
+            // Fallback succeeded — auto-promote: swap fallback into primary, demote old primary
+            if (tool.id) {
+              try {
+                // Build demoted primary selector set from current execution
+                const demotedPrimary = {};
+                for (const key of Object.keys(fallbackSet)) {
+                  if (execution[key] !== undefined) {
+                    demotedPrimary[key] = execution[key];
+                  }
+                }
+                // New fallback_selectors: old primary (demoted) + remaining fallbacks (excluding the one that succeeded)
+                const remainingFallbacks = tool.fallback_selectors.filter(fs => fs !== fallbackSet);
+                const newFallbacks = Object.keys(demotedPrimary).length > 0
+                  ? [demotedPrimary, ...remainingFallbacks]
+                  : remainingFallbacks;
+                // Merge successful fallback into execution
+                const newExecution = { ...execution, ...fallbackSet };
+                await this._store.updateTool(tool.id, {
+                  execution: newExecution,
+                  fallbackSelectors: newFallbacks.length > 0 ? newFallbacks : undefined,
+                });
+                if (tool.failure_count > 0) {
+                  await this._store.resetFailureCount(tool.id);
+                }
+              } catch {} // fire-and-forget promotion
             }
-            const header = `### Executed: ${tool.name} (fallback selector)\n`;
+            const header = `### Executed: ${tool.name} (fallback selector promoted)\n`;
             return prependTextToResult(fallbackResult, header);
           }
         } catch {}
@@ -626,6 +648,14 @@ ${toolList}
         content: [{ type: 'text', text: `### Error parsing execution JSON\n${String(e)}` }],
         isError: true,
       };
+    }
+
+    // Auto-generate fallback selectors
+    if (!execution.fallback_selectors) {
+      const autoFallbacks = generateFallbackSelectors(execution);
+      if (autoFallbacks.length > 0) {
+        execution.fallback_selectors = autoFallbacks;
+      }
     }
 
     const warnings = [];
@@ -933,6 +963,88 @@ function truncateResult(result) {
   }
 
   return { ...result, content };
+}
+
+/**
+ * Generate alternative selectors from an execution's primary selectors.
+ * Returns an array of fallback selector sets.
+ */
+function generateFallbackSelectors(execution) {
+  const fallbacks = [];
+
+  // Generate fallback for resultSelector
+  if (execution.resultSelector && typeof execution.resultSelector === 'string') {
+    const alt = generateAlternativeSelector(execution.resultSelector);
+    if (alt) fallbacks.push({ resultSelector: alt });
+  }
+
+  // Generate fallbacks for field selectors
+  if (execution.fields) {
+    for (const field of execution.fields) {
+      if (field.selector && typeof field.selector === 'string') {
+        const alt = generateAlternativeSelector(field.selector);
+        if (alt) {
+          const altFields = execution.fields.map(f =>
+            f === field ? { ...f, selector: alt } : f
+          );
+          fallbacks.push({ fields: altFields });
+        }
+      }
+    }
+  }
+
+  // Generate fallback for submit selector
+  if (execution.submit?.selector && typeof execution.submit.selector === 'string') {
+    const alt = generateAlternativeSelector(execution.submit.selector);
+    if (alt) fallbacks.push({ submit: { ...execution.submit, selector: alt } });
+  }
+
+  return fallbacks;
+}
+
+/**
+ * Generate an alternative selector from a primary CSS selector.
+ * Returns a Playwright-style selector string or null.
+ */
+function generateAlternativeSelector(cssSelector) {
+  if (typeof cssSelector !== 'string') return null;
+
+  // data-testid → text content variant
+  const testIdMatch = cssSelector.match(/\[data-testid=["']([^"']+)["']\]/);
+  if (testIdMatch) {
+    // Convert testid to a text-based selector
+    const readable = testIdMatch[1].replace(/[-_]/g, ' ');
+    return `:has-text("${readable}")`;
+  }
+
+  // Class-heavy selector → role-based variant
+  // e.g., "button.submit-btn" → 'role=button'
+  const tagMatch = cssSelector.match(/^(button|input|select|textarea|a)\b/);
+  if (tagMatch) {
+    const roleMap = {
+      button: 'button',
+      input: 'textbox',
+      select: 'combobox',
+      textarea: 'textbox',
+      a: 'link',
+    };
+    const role = roleMap[tagMatch[1]];
+    if (role) return `role=${role}`;
+  }
+
+  // #id selector → [id="..."] attribute selector (more resilient to framework changes)
+  const idMatch = cssSelector.match(/^#([\w-]+)$/);
+  if (idMatch) {
+    return `[id="${idMatch[1]}"]`;
+  }
+
+  // aria-label extraction from existing selector
+  const ariaMatch = cssSelector.match(/\[aria-label=["']([^"']+)["']\]/);
+  if (ariaMatch) {
+    return `:has-text("${ariaMatch[1]}")`;
+  }
+
+  return null;
 }
 
 module.exports = { XbotBackend };
