@@ -18,30 +18,22 @@ import { test, expect } from './fixtures';
 
 test('test snapshot tool list', async ({ client }) => {
   const { tools } = await client.listTools();
-  expect(new Set(tools.map(t => t.name))).toEqual(new Set([
-    'browser_click',
-    'browser_console_messages',
-    'browser_drag',
-    'browser_evaluate',
-    'browser_file_upload',
-    'browser_fill_form',
-    'browser_handle_dialog',
-    'browser_hover',
-    'browser_select_option',
-    'browser_type',
-    'browser_close',
-    'browser_install',
-    'browser_navigate_back',
-    'browser_navigate',
-    'browser_network_requests',
-    'browser_press_key',
-    'browser_resize',
-    'browser_run_code',
-    'browser_snapshot',
-    'browser_tabs',
-    'browser_take_screenshot',
-    'browser_wait_for',
-  ]));
+  const toolNames = new Set(tools.map(t => t.name));
+  // Xbot exposes its own MCP tool surface (not raw Playwright tools)
+  expect(toolNames).toContain('browser_navigate');
+  expect(toolNames).toContain('browser_snapshot');
+  expect(toolNames).toContain('browser_snapshot_diff');
+  expect(toolNames).toContain('browser_console');
+  expect(toolNames).toContain('browser_network');
+  expect(toolNames).toContain('browser_screenshot');
+  expect(toolNames).toContain('browser_fallback');
+  expect(toolNames).toContain('xbot_execute');
+  expect(toolNames).toContain('xbot_memory');
+  expect(toolNames).toContain('add_create-config');
+  expect(toolNames).toContain('add_tool');
+  expect(toolNames).toContain('add_update-tool');
+  expect(toolNames).toContain('add_delete-tool');
+  expect(toolNames).toContain('score_virality');
 });
 
 test('test capabilities (pdf)', async ({ startClient }) => {

@@ -1,6 +1,6 @@
 {
   "name": "xbot-browser",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Xbot Browser - MCP server for browser automation via Playwright",
   "repository": {
     "type": "git",

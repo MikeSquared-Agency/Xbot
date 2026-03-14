@@ -29,4 +29,35 @@ async function saveSession(context, sessionFilePath) {
   } catch {}
 }
 
-module.exports = { loadSession, saveSession };
+/**
+ * Create a debounced auto-saver that persists session state
+ * after navigations and actions.
+ *
+ * @param {string} sessionFilePath - Path to save session state
+ * @param {number} [debounceMs=3000] - Debounce delay in milliseconds
+ * @returns {{ schedule(context): void, flush(context): Promise<void> } | null}
+ */
+function createAutoSaver(sessionFilePath, debounceMs = 3000) {
+  if (!sessionFilePath) return null;
+  let timer = null;
+
+  return {
+    schedule(context) {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(async () => {
+        timer = null;
+        try {
+          await saveSession(context, sessionFilePath);
+        } catch {} // swallow — auto-save is best-effort
+      }, debounceMs);
+    },
+
+    async flush(context) {
+      if (timer) clearTimeout(timer);
+      timer = null;
+      await saveSession(context, sessionFilePath);
+    },
+  };
+}
+
+module.exports = { loadSession, saveSession, createAutoSaver };

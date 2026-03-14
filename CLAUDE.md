@@ -17,7 +17,8 @@ These are the tools an MCP client can call on xbot-browser. All tools communicat
 | Tool | Type | Description |
 |------|------|-------------|
 | `browser_navigate` | action | Navigate to a URL. Returns page info + any saved tools for the site. |
-| `browser_snapshot` | readOnly | Capture accessibility snapshot of the current page. Returns element refs (`e12`, `e37`) used by fallback tools. Accepts `mode` param: `full` (default, everything), `compact` (interactive elements only, ~90% smaller), `interactive` (compact + nearby labels/headings for context). |
+| `browser_snapshot` | readOnly | Capture accessibility snapshot of the current page. Returns element refs (`e12`, `e37`) used by fallback tools. Params: `mode` (`full`/`compact`/`interactive`), `depth` (max tree depth), `selector` (CSS scope — no refs), `maxLength` (per-call char limit). |
+| `browser_snapshot_diff` | readOnly | Returns only what changed since the last snapshot — added (`+`) and removed (`-`) lines. Much smaller than full snapshot after an action. Accepts `mode` param. |
 | `browser_console` | readOnly | Returns browser console messages. Optional `type` filter: `error`, `warning`, `log`, `info`, `all` (default). |
 | `browser_network` | readOnly | Returns captured network requests. Optional `jsonOnly` filter to return only JSON API responses. |
 | `browser_screenshot` | readOnly | Takes a visual screenshot of the current page. Optional `raw` flag to return base64-encoded image data. |
@@ -252,6 +253,18 @@ The translator auto-detects which type and uses either `page.evaluate()` (DOM, f
 - **Auto-promote fallbacks**: When a fallback selector succeeds during tool execution, it is automatically promoted to primary and the old primary is demoted. The tool definition is updated in Cortex.
 - **Auto-generate fallbacks**: When `add_tool` is called, alternative selectors are generated automatically from the primary selector (CSS to `role=`, `#id` to `[id=""]`, `data-testid` to `:has-text()`, `aria-label` to `:has-text()`). These are stored as `fallback_selectors` on the tool node.
 
+### Snapshot Diff & Filtering
+
+- **Snapshot diff** (`browser_snapshot_diff`) — Returns only lines that changed since the last snapshot. Uses a two-pointer ordered line diff with lookahead sync. Stores the baseline after every `browser_snapshot` or `browser_snapshot_diff` call. Resets on navigation.
+- **Depth limiting** — `browser_snapshot({ depth: N })` limits the ARIA tree to N levels deep. Useful for very large pages (e.g. X.com timelines). Depth 0 = top-level only.
+- **Selector scoping** — `browser_snapshot({ selector: "#main" })` scopes the snapshot to a specific DOM element via `locator.ariaSnapshot()`. Note: scoped snapshots do NOT include element refs for interaction.
+- **Content boundary markers** — All page-derived content is wrapped in `--- PAGE CONTENT START ---` / `--- PAGE CONTENT END ---` markers to prevent prompt injection. Applied to snapshot, snapshot_diff, console, network, and execute results. Nudges/metadata appear outside the markers.
+- **Output length limits** — Configurable via `XBOT_MAX_OUTPUT` env var (default 40000 chars). Per-call override via `browser_snapshot({ maxLength: N })`. Truncation preserves line boundaries with `[...truncated, N more chars]` suffix.
+
+### Auto-Save Session Persistence
+
+Browser session state (cookies, localStorage) is auto-saved after navigations and actions when a session file is configured. Uses a 3-second debounce to avoid redundant writes during rapid navigation. Implemented via `createAutoSaver()` in `browser/session.js`.
+
 ### Anti-Detection
 
 Beyond configurable delays and typing simulation, xbot-browser includes:
@@ -276,10 +289,10 @@ Beyond configurable delays and typing simulation, xbot-browser includes:
 | `cortex/tool-index.js` | Local upsert index | `ToolIndex`, `configKey`, `toolKey` |
 | `tools/registry.js` | Tool lookup for current page | `ToolRegistry` |
 | `tools/fallback.js` | Fallback tracking + save nudges | `FallbackTracker` |
-| `browser/session.js` | Browser state save/load | `saveSession`, `loadSession` |
+| `browser/session.js` | Browser state save/load + auto-save | `saveSession`, `loadSession`, `createAutoSaver` |
 | `browser/anti-detection.js` | Delay/jitter helpers + fingerprint re-exports | `resolveDelays`, `generateDelayCode` |
 | `browser/fingerprint.js` | Fingerprint masking, UA rotation, human-like mouse | `applyFingerprint`, `getRandomUA`, `humanMouseMove` |
-| `browser/snapshot-filter.js` | Compact/interactive snapshot filtering | `filterSnapshot` |
+| `browser/snapshot-filter.js` | Snapshot filtering, depth limiting, diffing | `filterSnapshot`, `limitDepth`, `diffSnapshot` |
 
 ### skills/ (Markdown)
 
@@ -355,6 +368,7 @@ node scripts/test-x-tools.js --browser chrome  # x: tool integration tests
 | `CORTEX_DATA_DIR` | no | `./data/cortex` | Cortex data directory |
 | `CORTEX_AUTOSTART` | no | `true` | Auto-start Cortex binary |
 | `CORTEX_TIMEOUT_MS` | no | `2000` | HTTP timeout for Cortex |
+| `XBOT_MAX_OUTPUT` | no | `40000` | Max output characters for tool results |
 
 ## Do NOT
 

@@ -248,6 +248,22 @@ Uses reply (13.5x), retweet (20x), bookmark (10x), like (1x) weights with expone
   type: 'readOnly',
 };
 
+const browserSnapshotDiffSchema = {
+  name: 'browser_snapshot_diff',
+  title: 'Snapshot diff',
+  description: `Returns only what changed since the last snapshot — added and removed lines. Much smaller than a full snapshot after an action.
+<usage-rules>
+- Call this AFTER performing an action (click, fill, navigate) to see what changed.
+- First call returns the full snapshot (no previous baseline).
+- Uses the same filtering modes as browser_snapshot.
+- The diff shows lines prefixed with + (added) and - (removed).
+</usage-rules>`,
+  inputSchema: z.object({
+    mode: z.enum(['full', 'compact', 'interactive']).optional().describe('Snapshot detail level (same as browser_snapshot). Defaults to "full".'),
+  }),
+  type: 'readOnly',
+};
+
 module.exports = {
   xbotExecuteSchema,
   browserFallbackSchema,
@@ -259,5 +275,6 @@ module.exports = {
   browserConsoleSchema,
   browserNetworkSchema,
   browserScreenshotSchema,
+  browserSnapshotDiffSchema,
   scoreViralitySchema,
 };
