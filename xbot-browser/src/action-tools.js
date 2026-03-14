@@ -197,6 +197,38 @@ const addDeleteToolSchema = {
   type: 'action',
 };
 
+// ─── First-class Browser Tools ───
+
+const browserConsoleSchema = {
+  name: 'browser_console',
+  title: 'Get console messages',
+  description: 'Returns console messages captured from the browser page (errors, warnings, logs, info). Use this to inspect JavaScript errors, API failures, or debug output without going through browser_fallback.',
+  inputSchema: z.object({
+    type: z.enum(['error', 'warning', 'log', 'info', 'all']).optional().describe('Filter messages by type. Defaults to "all".'),
+  }),
+  type: 'readOnly',
+};
+
+const browserNetworkSchema = {
+  name: 'browser_network',
+  title: 'Get network requests',
+  description: 'Returns captured network requests and responses from the browser page. Useful for inspecting API calls, checking response data, and debugging network issues without going through browser_fallback.',
+  inputSchema: z.object({
+    jsonOnly: z.boolean().optional().describe('When true, only returns fetch/XHR responses with JSON content-type.'),
+  }),
+  type: 'readOnly',
+};
+
+const browserScreenshotSchema = {
+  name: 'browser_screenshot',
+  title: 'Take a screenshot',
+  description: 'Captures a visual screenshot of the current browser page. Useful for seeing what the page actually looks like, debugging layout issues, or verifying visual state.',
+  inputSchema: z.object({
+    raw: z.boolean().optional().describe('When true, returns base64 image data instead of saving to file.'),
+  }),
+  type: 'readOnly',
+};
+
 const scoreViralitySchema = {
   name: 'score_virality',
   title: 'Score tweet virality',
@@ -224,5 +256,8 @@ module.exports = {
   addToolSchema,
   addUpdateToolSchema,
   addDeleteToolSchema,
+  browserConsoleSchema,
+  browserNetworkSchema,
+  browserScreenshotSchema,
   scoreViralitySchema,
 };

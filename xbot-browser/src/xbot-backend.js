@@ -12,6 +12,7 @@ const { translateAction, translateWorkflow } = require('./action-translator');
 const { ToolRegistry } = require('./tools/registry');
 const { FallbackTracker } = require('./tools/fallback');
 const { saveSession } = require('./browser/session');
+const { filterSnapshot } = require('./browser/snapshot-filter');
 const { seedIfNeeded } = require('./cortex/seed');
 const {
   xbotExecuteSchema,
@@ -21,6 +22,9 @@ const {
   addToolSchema,
   addUpdateToolSchema,
   addDeleteToolSchema,
+  browserConsoleSchema,
+  browserNetworkSchema,
+  browserScreenshotSchema,
   scoreViralitySchema,
 } = require('./action-tools');
 const { scoreVirality } = require('./score-virality');
@@ -70,6 +74,7 @@ class XbotBackend {
       description: 'Capture accessibility snapshot of the current page, this is better than screenshot',
       inputSchema: z.object({
         filename: z.string().optional().describe('Save snapshot to markdown file instead of returning it in the response.'),
+        mode: z.enum(['full', 'compact', 'interactive']).optional().describe('Snapshot detail level. "full" (default): everything. "compact": interactive elements only (buttons, links, inputs) with refs — ~90% smaller. "interactive": compact + nearby labels and headings for context.'),
       }),
       type: 'readOnly',
     };
@@ -77,6 +82,9 @@ class XbotBackend {
     return [
       navigateSchema,
       snapshotSchema,
+      browserConsoleSchema,
+      browserNetworkSchema,
+      browserScreenshotSchema,
       browserFallbackSchema,
       xbotExecuteSchema,
       xbotMemorySearchSchema,
@@ -94,6 +102,12 @@ class XbotBackend {
         return this._handleNavigate(rawArguments, progress);
       case 'browser_snapshot':
         return this._handleSnapshot(rawArguments, progress);
+      case 'browser_console':
+        return this._handleConsole(rawArguments, progress);
+      case 'browser_network':
+        return this._handleNetwork(rawArguments, progress);
+      case 'browser_screenshot':
+        return this._handleScreenshot(rawArguments, progress);
       case 'browser_fallback':
         return this._handleFallback(rawArguments, progress);
       case 'xbot_execute':
@@ -203,7 +217,21 @@ No saved tools for ${domain}. Use browser_fallback to interact with the page.
   // ─── Snapshot with SPA detection + nudges ───
 
   async _handleSnapshot(args, progress) {
-    let result = await this._inner.callTool('browser_snapshot', args, progress);
+    const { mode, ...snapshotArgs } = args;
+    let result = await this._inner.callTool('browser_snapshot', snapshotArgs, progress);
+
+    // Apply snapshot filtering if mode is specified
+    if (mode && mode !== 'full') {
+      const content = result.content || [];
+      result = {
+        ...result,
+        content: content.map(item => {
+          if (item.type !== 'text') return item;
+          return { ...item, text: filterSnapshot(item.text, mode) };
+        }),
+      };
+    }
+
     result = truncateResult(result);
 
     let nudgePrefix = '';
@@ -803,6 +831,56 @@ ${toolList}
     return {
       content: [{ type: 'text', text: `### Virality Score: ${result.score} (${result.rating})\n${result.reasoning}\n\n**Breakdown:** ${JSON.stringify(result.breakdown)}` }],
     }
+  }
+
+  // ─── First-class browser tools ───
+
+  async _handleConsole(args, progress) {
+    let result = await this._inner.callTool('browser_console_messages', {}, progress);
+    if (args.type && args.type !== 'all') {
+      const content = result.content || [];
+      const filtered = [];
+      for (const item of content) {
+        if (item.type !== 'text') { filtered.push(item); continue; }
+        const lines = item.text.split('\n').filter(line => {
+          const lower = line.toLowerCase();
+          return lower.includes(`[${args.type}]`) || lower.startsWith(args.type) || !line.match(/^\[(error|warning|log|info)\]/i);
+        });
+        if (lines.length > 0) filtered.push({ ...item, text: lines.join('\n') });
+      }
+      result = { ...result, content: filtered };
+    }
+    return truncateResult(result);
+  }
+
+  async _handleNetwork(args, progress) {
+    let result = await this._inner.callTool('browser_network_requests', {}, progress);
+    if (args.jsonOnly) {
+      const content = result.content || [];
+      const filtered = [];
+      for (const item of content) {
+        if (item.type !== 'text') { filtered.push(item); continue; }
+        const lines = item.text.split('\n');
+        const jsonLines = [];
+        let inJsonBlock = false;
+        for (const line of lines) {
+          if (line.match(/content-type.*application\/json/i) || line.match(/fetch|xhr/i)) {
+            inJsonBlock = true;
+          }
+          if (inJsonBlock) jsonLines.push(line);
+          if (inJsonBlock && line.trim() === '') inJsonBlock = false;
+        }
+        if (jsonLines.length > 0) filtered.push({ ...item, text: jsonLines.join('\n') });
+      }
+      if (filtered.length > 0) result = { ...result, content: filtered };
+    }
+    return truncateResult(result);
+  }
+
+  async _handleScreenshot(args, progress) {
+    const screenshotArgs = {};
+    if (args.raw) screenshotArgs.raw = true;
+    return this._inner.callTool('browser_take_screenshot', screenshotArgs, progress);
   }
 
   async serverClosed(server) {
