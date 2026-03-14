@@ -24,6 +24,7 @@ const {
   scoreViralitySchema,
 } = require('./action-tools');
 const { scoreVirality } = require('./score-virality');
+const { getFingerprintScript } = require('./browser/fingerprint');
 
 class XbotBackend {
   constructor(config, browserContextFactory, options = {}) {
@@ -46,6 +47,9 @@ class XbotBackend {
     });
     await seedIfNeeded(this._store, path.join(__dirname, '../seeds/tools.json'));
     await this._inner.initialize(clientInfo);
+
+    // Inject fingerprint masking into new browser contexts
+    this._fingerprintScript = getFingerprintScript();
   }
 
   _resetPageState() {
@@ -125,6 +129,15 @@ class XbotBackend {
 
     // Stage 1: Navigate
     let result = await this._inner.callTool('browser_navigate', args, progress);
+
+    // Inject fingerprint masking (fire-and-forget on first navigation)
+    if (this._fingerprintScript && !this._fingerprintInjected) {
+      this._fingerprintInjected = true;
+      this._inner.callTool('browser_run_code', {
+        code: `async (page) => { await page.context().addInitScript(${JSON.stringify(this._fingerprintScript)}); return { injected: true }; }`,
+      }).catch(() => {});
+    }
+
     result = truncateResult(result);
     const requestedUrl = args.url;
 
