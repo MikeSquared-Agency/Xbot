@@ -1,5 +1,7 @@
 'use strict';
 
+const { generateHumanMouseCode, randomUserAgent } = require('./fingerprint');
+
 const DEFAULT_DELAYS = {
   beforeAction: 0,
   afterAction: 0,
@@ -62,4 +64,4 @@ function generateScrollCode(scrollConfig, delays) {
   return lines.join('\n');
 }
 
-module.exports = { resolveDelays, hasDelays, generateDelayCode, generateScrollCode };
+module.exports = { resolveDelays, hasDelays, generateDelayCode, generateScrollCode, generateHumanMouseCode, randomUserAgent };

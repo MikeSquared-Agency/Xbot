@@ -1,6 +1,6 @@
 'use strict';
 
-const { resolveDelays, hasDelays, generateDelayCode, generateScrollCode } = require('./browser/anti-detection');
+const { resolveDelays, hasDelays, generateDelayCode, generateScrollCode, generateHumanMouseCode } = require('./browser/anti-detection');
 
 // --- Playwright selector detection ---
 
@@ -523,6 +523,10 @@ function translateWorkflow(action, args) {
       }
 
       case 'click': {
+        if (step.humanLike) {
+          lines.push(generateHumanMouseCode(selectorToLocator(step.selector)));
+          break;
+        }
         const selectors = [step.selector, ...(step.fallbackSelectors || [])].filter(Boolean);
         lines.push(`  {`);
         lines.push(`    const _sels = ${JSON.stringify(selectors)};`);
