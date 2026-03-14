@@ -17,7 +17,10 @@ These are the tools an MCP client can call on xbot-browser. All tools communicat
 | Tool | Type | Description |
 |------|------|-------------|
 | `browser_navigate` | action | Navigate to a URL. Returns page info + any saved tools for the site. |
-| `browser_snapshot` | readOnly | Capture accessibility snapshot of the current page. Returns element refs (`e12`, `e37`) used by fallback tools. |
+| `browser_snapshot` | readOnly | Capture accessibility snapshot of the current page. Returns element refs (`e12`, `e37`) used by fallback tools. Accepts `mode` param: `full` (default, everything), `compact` (interactive elements only, ~90% smaller), `interactive` (compact + nearby labels/headings for context). |
+| `browser_console` | readOnly | Returns browser console messages. Optional `type` filter: `error`, `warning`, `log`, `info`, `all` (default). |
+| `browser_network` | readOnly | Returns captured network requests. Optional `jsonOnly` filter to return only JSON API responses. |
+| `browser_screenshot` | readOnly | Takes a visual screenshot of the current page. Optional `raw` flag to return base64-encoded image data. |
 | `browser_fallback` | action | Gateway to raw Playwright tools (`browser_click`, `browser_type`, `browser_fill_form`, etc.). Use `peek: true` to inspect a tool's schema. All element-targeting uses `ref` values from `browser_snapshot`, NOT CSS selectors. |
 
 ### Saved Tool Tools
@@ -87,7 +90,24 @@ Multi-step workflow:
 }
 ```
 
-**Workflow step types:** `navigate`, `waitForLoadState`, `wait`, `click`, `fill`, `scroll`, `download`, `checkUrl`, `extract`, `return`
+**Workflow step types:** `navigate`, `waitForLoadState`, `wait`, `click`, `fill`, `scroll`, `download`, `checkUrl`, `extract`, `return`, `assertVisible`, `if`, `retry`
+
+**Conditional and retry steps:**
+
+```json
+{ "action": "assertVisible", "selector": ".tweet", "into": "hasTweets" }
+```
+Checks if an element is visible and stores the boolean result in a variable.
+
+```json
+{ "action": "if", "condition": "isLoginPage", "then": [...], "else": [...] }
+```
+Branches on a variable set by `assertVisible` or `extract`. `then` and `else` contain arrays of steps.
+
+```json
+{ "action": "retry", "maxAttempts": 3, "delayMs": 1000, "steps": [...] }
+```
+Retries a block of steps up to `maxAttempts` times with `delayMs` between attempts.
 
 **extractMode options:** `text`, `list`, `html`, `attribute`, `table`, `innerText`, `innerTextList`, `recordList`
 
@@ -227,6 +247,19 @@ Selectors can be:
 
 The translator auto-detects which type and uses either `page.evaluate()` (DOM, faster) or `page.locator()` (Playwright API, more powerful).
 
+### Automatic Selector Learning
+
+- **Auto-promote fallbacks**: When a fallback selector succeeds during tool execution, it is automatically promoted to primary and the old primary is demoted. The tool definition is updated in Cortex.
+- **Auto-generate fallbacks**: When `add_tool` is called, alternative selectors are generated automatically from the primary selector (CSS to `role=`, `#id` to `[id=""]`, `data-testid` to `:has-text()`, `aria-label` to `:has-text()`). These are stored as `fallback_selectors` on the tool node.
+
+### Anti-Detection
+
+Beyond configurable delays and typing simulation, xbot-browser includes:
+
+- **Fingerprint masking** — An `addInitScript` payload applied on every page that hides `navigator.webdriver`, fakes `navigator.plugins`, stubs `chrome.runtime`, and patches `Notification.permission`. Implemented in `browser/fingerprint.js`.
+- **Human-like mouse movement** — Bezier curve mouse paths for click steps. Enable with `humanLike: true` on a workflow `click` step. The cursor travels a randomized arc instead of teleporting.
+- **User-agent rotation** — A pool of 5 real Chrome UA strings, one selected at random per browser session. Prevents UA-based fingerprinting across sessions.
+
 ## File Map
 
 ### xbot-browser/src/ (all JavaScript, CommonJS)
@@ -234,7 +267,7 @@ The translator auto-detects which type and uses either `page.evaluate()` (DOM, f
 | File | Purpose | Key exports |
 |------|---------|-------------|
 | `xbot-backend.js` | Main MCP orchestrator | `XbotBackend` |
-| `action-translator.js` | Tool → Playwright code | `translateAction`, `translateWorkflow` |
+| `action-translator.js` | Tool → Playwright code | `translateAction`, `translateWorkflow`, `translateStep` |
 | `action-tools.js` | MCP tool schemas (Zod) | `xbotExecuteSchema`, etc. |
 | `action-schema.js` | Validation schemas | Zod schemas for params, fields, execution |
 | `cortex/cortex-store.js` | Cortex storage layer | `CortexStore` |
@@ -244,7 +277,9 @@ The translator auto-detects which type and uses either `page.evaluate()` (DOM, f
 | `tools/registry.js` | Tool lookup for current page | `ToolRegistry` |
 | `tools/fallback.js` | Fallback tracking + save nudges | `FallbackTracker` |
 | `browser/session.js` | Browser state save/load | `saveSession`, `loadSession` |
-| `browser/anti-detection.js` | Delay/jitter helpers | `resolveDelays`, `generateDelayCode` |
+| `browser/anti-detection.js` | Delay/jitter helpers + fingerprint re-exports | `resolveDelays`, `generateDelayCode` |
+| `browser/fingerprint.js` | Fingerprint masking, UA rotation, human-like mouse | `applyFingerprint`, `getRandomUA`, `humanMouseMove` |
+| `browser/snapshot-filter.js` | Compact/interactive snapshot filtering | `filterSnapshot` |
 
 ### skills/ (Markdown)
 

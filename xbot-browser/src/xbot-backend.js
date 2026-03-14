@@ -1138,4 +1138,4 @@ function generateAlternativeSelector(cssSelector) {
   return null;
 }
 
-module.exports = { XbotBackend };
+module.exports = { XbotBackend, generateFallbackSelectors, generateAlternativeSelector };

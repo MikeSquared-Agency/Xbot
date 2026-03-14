@@ -23,8 +23,11 @@ When you navigate to a site:
 - **Domain briefings** — LLM receives contextual memory about known sites on navigation
 - **Importance feedback** — Successful tool executions boost node importance; repeated failures decay it
 - **Session persistence** — Save/load browser login state with `--session-file`
-- **Anti-detection** — Configurable delays, typing simulation, scroll behavior
-- **Selector resilience** — Fallback selectors and automatic failure tracking with relearn nudges
+- **Anti-detection** — Fingerprint masking, human-like Bezier mouse movement, user-agent rotation, configurable delays, and typing simulation
+- **Selector resilience** — Fallback selectors with automatic promotion on success and auto-generated alternatives
+- **First-class observability** — `browser_console`, `browser_network`, and `browser_screenshot` tools for debugging without `browser_fallback`
+- **Compact snapshots** — `browser_snapshot` supports `compact` and `interactive` modes for ~90% smaller responses
+- **Workflow conditionals** — `assertVisible`, `if`/`else` branching, and `retry` steps for robust multi-step tools
 - **X (Twitter) tools** — Pre-built tools for feed reading, posting, searching, and metrics
 
 ## Project Structure
@@ -36,7 +39,7 @@ xbot/
 │   │   ├── xbot-backend.js         # Main orchestrator
 │   │   ├── action-store.js          # In-memory store + local embeddings
 │   │   ├── utils.js                 # Shared utilities (extractDomain, matchUrlPattern)
-│   │   ├── action-translator.js     # Tool → Playwright code generator
+│   │   ├── action-translator.js     # Tool → Playwright code generator (+ translateStep)
 │   │   ├── action-tools.js          # MCP tool schemas
 │   │   ├── action-schema.js         # Validation schemas (Zod)
 │   │   ├── cortex/
@@ -45,22 +48,21 @@ xbot/
 │   │   │   └── tool-index.js        # Local upsert index (JSON on disk)
 │   │   ├── tools/
 │   │   │   ├── registry.js          # Tool lookup logic
-│   │   │   ├── fallback.js          # Fallback/nudge logic
+│   │   │   ├── fallback.js          # Fallback/nudge logic + auto-promote
 │   │   │   └── x-tools.js           # X (Twitter) handlers
 │   │   └── browser/
 │   │       ├── session.js           # Session save/load
-│   │       └── anti-detection.js    # Delay helpers
+│   │       ├── anti-detection.js    # Delay helpers + fingerprint re-exports
+│   │       ├── fingerprint.js       # Fingerprint masking, UA rotation, human-like mouse
+│   │       └── snapshot-filter.js   # Compact/interactive snapshot filtering
 │   └── tests/
-├── echo/                        # Tweet discovery & engagement (Python)
-│   ├── orchestrator.py              # Main orchestration loop
-│   ├── scout/                       # Tweet discovery
-│   ├── compose/                     # Reply generation
-│   ├── analytics/                   # Performance tracking
-│   ├── voice/                       # Voice profile analysis
-│   └── xbot/                        # Xbot MCP client
+├── skills/                      # Agent skill files (Markdown)
+│   ├── research-tweets.md           # Tweet discovery and candidate evaluation
+│   ├── compose-tweets.md            # Reply writing, posting, and recording
+│   └── x-analytics.md              # Analytics ingestion and insight generation
 ├── cortex.toml                  # Cortex server configuration
 ├── docker-compose.yml           # Cortex container setup
-└── supabase-archived/           # Legacy Postgres migrations (archived)
+└── CHANGELOG.md                 # Release history
 ```
 
 ## Prerequisites
@@ -119,13 +121,6 @@ cortex serve
 
 To inspect the knowledge graph: http://localhost:9091/viz
 
-### 5. Install echo (optional — X/Twitter automation)
-
-```bash
-cd echo
-pip install -e .
-```
-
 ## Usage
 
 ### MCP server config
@@ -152,12 +147,15 @@ pip install -e .
 | Tool | Description |
 |------|-------------|
 | `browser_navigate` | Navigate to URL — loads stored tools and domain briefing |
-| `browser_snapshot` | Accessibility snapshot of the current page |
+| `browser_snapshot` | Accessibility snapshot of the current page (supports `mode`: `full`, `compact`, `interactive`) |
+| `browser_console` | Returns browser console messages (optional `type` filter) |
+| `browser_network` | Returns captured network requests (optional `jsonOnly` filter) |
+| `browser_screenshot` | Takes a visual screenshot (optional `raw` flag for base64) |
 | `xbot_execute` | Run a stored tool by name with parameters |
 | `xbot_memory` | Semantic search for saved sites and tools |
 | `browser_fallback` | Gateway to raw Playwright tools |
 | `add_create-config` | Create a domain config |
-| `add_tool` | Save a new tool to a config |
+| `add_tool` | Save a new tool to a config (auto-generates fallback selectors) |
 | `add_update-tool` | Update an existing tool |
 | `add_delete-tool` | Remove a tool |
 | `x:check-session` | Check X (Twitter) login state |
@@ -170,6 +168,47 @@ XBOT_DELAY_AFTER_ACTION=300
 XBOT_DELAY_TYPING=80
 XBOT_DELAY_JITTER=200
 ```
+
+### Compact Snapshot Modes
+
+`browser_snapshot` accepts a `mode` parameter to control output size:
+
+| Mode | Content | Use case |
+|------|---------|----------|
+| `full` (default) | Complete accessibility tree | Full page understanding |
+| `compact` | Interactive elements only (buttons, links, inputs) with refs | Quick action planning (~90% smaller) |
+| `interactive` | Compact + nearby labels and headings for context | Action planning with orientation |
+
+```json
+{ "mode": "compact" }
+```
+
+### Workflow Conditionals and Retry
+
+Workflow definitions support branching and retry logic for robust multi-step tools.
+
+**Assert visibility** -- check if an element exists and store the result:
+```json
+{ "action": "assertVisible", "selector": ".tweet", "into": "hasTweets" }
+```
+
+**Branch on a variable** -- run different steps based on a condition:
+```json
+{ "action": "if", "condition": "isLoginPage", "then": [...], "else": [...] }
+```
+
+**Retry with delay** -- re-attempt a block of steps on failure:
+```json
+{ "action": "retry", "maxAttempts": 3, "delayMs": 1000, "steps": [...] }
+```
+
+### Anti-Detection
+
+Beyond configurable delays, xbot-browser applies:
+
+- **Fingerprint masking** -- hides `navigator.webdriver`, fakes `navigator.plugins`, stubs `chrome.runtime`, patches `Notification.permission`
+- **Human-like mouse movement** -- Bezier curve paths on click steps (enable with `humanLike: true` in workflow click steps)
+- **User-agent rotation** -- pool of 5 real Chrome UA strings, one selected at random per session
 
 ### Docker
 
