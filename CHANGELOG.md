@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.0] - 2026-03-14
+
+### Added
+- `browser_snapshot_diff` MCP tool — returns only lines that changed since the last snapshot (added/removed), drastically reducing token usage after actions
+- Snapshot depth limiting — `browser_snapshot({ depth: N })` limits ARIA tree depth for large pages
+- Snapshot selector scoping — `browser_snapshot({ selector: "#main" })` scopes snapshot to a specific DOM element
+- Content boundary markers — all page-derived content wrapped in `--- PAGE CONTENT START/END ---` markers to prevent prompt injection
+- Configurable output length limits — `XBOT_MAX_OUTPUT` env var and per-call `maxLength` parameter
+- Auto-save session persistence — browser cookies and localStorage auto-saved after navigations and actions with debounced writes
+- Extensive test suite: integration tests for all new features, expanded unit tests for diff, depth limiting, auto-save, and boundary markers
+
+### Changed
+- `truncateResult` now accepts configurable limit parameter; truncation message shortened to `[...truncated, N more chars]`
+- `browser_snapshot` schema expanded with `depth`, `selector`, and `maxLength` parameters
+- Session shutdown uses auto-saver flush instead of manual save
+
 ## [0.1.0] - 2026-03-14
 
 ### Added

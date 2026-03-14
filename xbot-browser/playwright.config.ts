@@ -20,6 +20,7 @@ import type { TestOptions } from './tests/fixtures';
 
 export default defineConfig<TestOptions>({
   testDir: './tests',
+  testIgnore: ['**/unit/**', '**/cortex/**'],
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   workers: process.env.CI ? 2 : undefined,

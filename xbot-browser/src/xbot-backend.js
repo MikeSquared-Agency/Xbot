@@ -11,8 +11,8 @@ const fs = require('fs');
 const { translateAction, translateWorkflow } = require('./action-translator');
 const { ToolRegistry } = require('./tools/registry');
 const { FallbackTracker } = require('./tools/fallback');
-const { saveSession } = require('./browser/session');
-const { filterSnapshot } = require('./browser/snapshot-filter');
+const { saveSession, createAutoSaver } = require('./browser/session');
+const { filterSnapshot, limitDepth, diffSnapshot } = require('./browser/snapshot-filter');
 const { seedIfNeeded } = require('./cortex/seed');
 const {
   xbotExecuteSchema,
@@ -25,6 +25,7 @@ const {
   browserConsoleSchema,
   browserNetworkSchema,
   browserScreenshotSchema,
+  browserSnapshotDiffSchema,
   scoreViralitySchema,
 } = require('./action-tools');
 const { scoreVirality } = require('./score-virality');
@@ -40,6 +41,9 @@ class XbotBackend {
     this._registry = new ToolRegistry(this._store);
     this._fallback = new FallbackTracker();
     this._sessionFile = options.sessionFile || null;
+    this._lastSnapshotText = null;
+    this._maxOutputChars = options.maxOutputChars || parseInt(process.env.XBOT_MAX_OUTPUT || '40000', 10);
+    this._autoSaver = this._sessionFile ? createAutoSaver(this._sessionFile) : null;
   }
 
   async initialize(clientInfo) {
@@ -59,6 +63,7 @@ class XbotBackend {
   _resetPageState() {
     this._fallback.reset();
     this._registry.resetPageState();
+    this._lastSnapshotText = null;
   }
 
   async listTools() {
@@ -79,6 +84,9 @@ class XbotBackend {
       inputSchema: z.object({
         filename: z.string().optional().describe('Save snapshot to markdown file instead of returning it in the response.'),
         mode: z.enum(['full', 'compact', 'interactive']).optional().describe('Snapshot detail level. "full" (default): everything. "compact": interactive elements only (buttons, links, inputs) with refs — ~90% smaller. "interactive": compact + nearby labels and headings for context.'),
+        depth: z.number().optional().describe('Maximum ARIA tree depth to include. 0 = top-level only, 1 = one level deep, etc. Useful for large pages.'),
+        selector: z.string().optional().describe('CSS selector to scope the snapshot to a specific element. Note: scoped snapshots do not include element refs for interaction.'),
+        maxLength: z.number().optional().describe('Maximum output length in characters. Overrides the default limit.'),
       }),
       type: 'readOnly',
     };
@@ -86,6 +94,7 @@ class XbotBackend {
     return [
       navigateSchema,
       snapshotSchema,
+      browserSnapshotDiffSchema,
       browserConsoleSchema,
       browserNetworkSchema,
       browserScreenshotSchema,
@@ -106,6 +115,8 @@ class XbotBackend {
         return this._handleNavigate(rawArguments, progress);
       case 'browser_snapshot':
         return this._handleSnapshot(rawArguments, progress);
+      case 'browser_snapshot_diff':
+        return this._handleSnapshotDiff(rawArguments, progress);
       case 'browser_console':
         return this._handleConsole(rawArguments, progress);
       case 'browser_network':
@@ -206,6 +217,9 @@ class XbotBackend {
 
     // Prepend available tools info
     const domain = this._registry.currentDomain;
+
+    this._scheduleAutoSave();
+
     if (this._registry.currentTools.length > 0) {
       const toolList = this._registry.formatToolList();
 
@@ -230,8 +244,15 @@ No saved tools for ${domain}. Use browser_fallback to interact with the page.
   // ─── Snapshot with SPA detection + nudges ───
 
   async _handleSnapshot(args, progress) {
-    const { mode, ...snapshotArgs } = args;
-    let result = await this._inner.callTool('browser_snapshot', snapshotArgs, progress);
+    const { mode, depth, selector, maxLength, ...snapshotArgs } = args;
+
+    let result;
+
+    if (selector) {
+      result = await this._handleScopedSnapshot(selector, progress);
+    } else {
+      result = await this._inner.callTool('browser_snapshot', snapshotArgs, progress);
+    }
 
     // Apply snapshot filtering if mode is specified
     if (mode && mode !== 'full') {
@@ -245,7 +266,24 @@ No saved tools for ${domain}. Use browser_fallback to interact with the page.
       };
     }
 
-    result = truncateResult(result);
+    // Apply depth limiting
+    if (depth != null) {
+      result = {
+        ...result,
+        content: (result.content || []).map(item => {
+          if (item.type !== 'text') return item;
+          return { ...item, text: limitDepth(item.text, depth) };
+        }),
+      };
+    }
+
+    // Store snapshot for diffing (after filtering/limiting, before truncation)
+    this._lastSnapshotText = extractSnapshotYaml(result);
+
+    result = truncateResult(result, maxLength ? Math.min(maxLength, this._maxOutputChars) : this._maxOutputChars);
+
+    // Wrap page content in boundary markers
+    result = wrapPageContent(result);
 
     let nudgePrefix = '';
 
@@ -304,6 +342,82 @@ ${toolList}
     }
 
     return result;
+  }
+
+  // ─── Scoped snapshot via CSS selector ───
+
+  async _handleScopedSnapshot(selector, progress) {
+    const code = [
+      'async (page) => {',
+      `  const el = page.locator(${JSON.stringify(selector)});`,
+      '  await el.waitFor({ state: "attached", timeout: 5000 });',
+      '  const snap = await el.ariaSnapshot();',
+      '  return JSON.stringify({ yaml: snap, url: page.url(), title: await page.title() });',
+      '}',
+    ].join('\n');
+
+    const runResult = await this._inner.callTool('browser_run_code', { code }, progress);
+    const text = (runResult.content?.[0]?.text || '').trim();
+
+    let yaml = '', url = '', title = '';
+    try {
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        yaml = parsed.yaml || '';
+        url = parsed.url || '';
+        title = parsed.title || '';
+      }
+    } catch {
+      yaml = text;
+    }
+
+    const formatted = `### Page\n- Page URL: ${url}\n- Page Title: ${title}\n\n### Snapshot (scoped to: ${selector})\nNote: Scoped snapshots do not include element refs. Use full snapshot for interaction.\n\`\`\`yaml\n${yaml}\n\`\`\``;
+
+    return { content: [{ type: 'text', text: formatted }] };
+  }
+
+  // ─── Snapshot diff ───
+
+  async _handleSnapshotDiff(args, progress) {
+    const { mode } = args;
+
+    let result = await this._inner.callTool('browser_snapshot', {}, progress);
+
+    // Apply mode filtering
+    if (mode && mode !== 'full') {
+      result = {
+        ...result,
+        content: (result.content || []).map(item => {
+          if (item.type !== 'text') return item;
+          return { ...item, text: filterSnapshot(item.text, mode) };
+        }),
+      };
+    }
+
+    const currentYaml = extractSnapshotYaml(result);
+    const diff = diffSnapshot(this._lastSnapshotText, currentYaml || '');
+
+    // Update stored snapshot
+    this._lastSnapshotText = currentYaml;
+
+    // Build the diff result with page metadata
+    const pageUrl = extractFinalUrl(result) || '';
+    let diffText = `### Page\n- Page URL: ${pageUrl}\n\n### Snapshot Diff\n${diff}`;
+    let diffResult = { content: [{ type: 'text', text: diffText }] };
+
+    diffResult = truncateResult(diffResult, this._maxOutputChars);
+    diffResult = wrapPageContent(diffResult);
+
+    return diffResult;
+  }
+
+  // ─── Auto-save session helper ───
+
+  _scheduleAutoSave() {
+    if (this._autoSaver && this._inner._context) {
+      this._autoSaver.schedule(this._inner._context);
+    }
   }
 
   // ─── Fallback with reminders ───
@@ -370,6 +484,7 @@ ${toolList}
     // Save reminder after fallback action
     if (!this._fallback.isReadOnly(toolName)) {
       result = appendTextToResult(result, this._fallback.buildSaveReminder(toolName));
+      this._scheduleAutoSave();
     }
 
     return result;
@@ -527,6 +642,9 @@ ${toolList}
       this._boostImportance(tool.id, 0.05);
     }
 
+    this._scheduleAutoSave();
+
+    result = wrapPageContent(result);
     const header = `### Executed: ${tool.name}\n`;
     return prependTextToResult(result, header);
   }
@@ -893,7 +1011,7 @@ ${toolList}
       }
       result = { ...result, content: filtered };
     }
-    return truncateResult(result);
+    return wrapPageContent(truncateResult(result, this._maxOutputChars));
   }
 
   async _handleNetwork(args, progress) {
@@ -917,7 +1035,7 @@ ${toolList}
       }
       if (filtered.length > 0) result = { ...result, content: filtered };
     }
-    return truncateResult(result);
+    return wrapPageContent(truncateResult(result, this._maxOutputChars));
   }
 
   async _handleScreenshot(args, progress) {
@@ -927,8 +1045,10 @@ ${toolList}
   }
 
   async serverClosed(server) {
-    // Save session state before shutdown
-    if (this._sessionFile && this._inner._context) {
+    // Flush auto-saved session state before shutdown
+    if (this._autoSaver && this._inner._context) {
+      await this._autoSaver.flush(this._inner._context);
+    } else if (this._sessionFile && this._inner._context) {
       await saveSession(this._inner._context, this._sessionFile);
     }
     this._inner.serverClosed(server);
@@ -937,7 +1057,9 @@ ${toolList}
 
 // ─── Constants ───
 
-const MAX_RESULT_CHARS = 40000;
+const DEFAULT_MAX_RESULT_CHARS = parseInt(process.env.XBOT_MAX_OUTPUT || '40000', 10);
+const PAGE_BOUNDARY_START = '--- PAGE CONTENT START ---';
+const PAGE_BOUNDARY_END = '--- PAGE CONTENT END ---';
 
 // ─── Helpers ───
 
@@ -1008,8 +1130,10 @@ function extractFinalUrl(result) {
   return null;
 }
 
-function truncateResult(result) {
+function truncateResult(result, limit) {
   if (!result?.content) return result;
+
+  const maxChars = limit || DEFAULT_MAX_RESULT_CHARS;
 
   let totalSize = 0;
   for (const item of result.content) {
@@ -1020,10 +1144,10 @@ function truncateResult(result) {
     }
   }
 
-  if (totalSize <= MAX_RESULT_CHARS) return result;
+  if (totalSize <= maxChars) return result;
 
   const content = [];
-  let budget = MAX_RESULT_CHARS;
+  let budget = maxChars;
 
   for (const item of result.content) {
     if (item.type === 'image') continue;
@@ -1047,13 +1171,42 @@ function truncateResult(result) {
 
       content.push({
         ...item,
-        text: truncated + `\n\n--- Content truncated (${Math.round(droppedChars / 1024)}KB omitted). Take another snapshot or use resultSelector in saved tools to extract specific data. ---`,
+        text: truncated + `\n\n[...truncated, ${droppedChars} more chars]`,
       });
       budget = 0;
     }
   }
 
   return { ...result, content };
+}
+
+/**
+ * Wrap page-derived content in boundary markers to prevent prompt injection.
+ */
+function wrapPageContent(result) {
+  if (!result?.content) return result;
+  const content = result.content.map(item => {
+    if (item.type !== 'text') return item;
+    return { ...item, text: `${PAGE_BOUNDARY_START}\n${item.text}\n${PAGE_BOUNDARY_END}` };
+  });
+  return { ...result, content };
+}
+
+/**
+ * Extract the ARIA snapshot YAML from a snapshot result.
+ * Handles both full mode (YAML in ```yaml block) and filtered mode (raw ARIA lines).
+ */
+function extractSnapshotYaml(result) {
+  if (!result?.content) return null;
+  for (const item of result.content) {
+    if (item.type !== 'text') continue;
+    // Try markdown yaml block first
+    const match = item.text.match(/```yaml\n([\s\S]*?)\n```/);
+    if (match) return match[1];
+    // Filtered mode: text is raw ARIA lines
+    if (item.text.match(/^\s*- \w+/m)) return item.text;
+  }
+  return null;
 }
 
 /**
