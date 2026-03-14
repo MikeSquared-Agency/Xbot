@@ -17,6 +17,7 @@ class FallbackTracker {
     this.toolsUsed = [];
     this.actionLog = [];
     this.savedToolCategories = new Set();
+    this.fallbackPromotions = []; // Track selector promotions for reporting
   }
 
   reset() {
@@ -26,6 +27,16 @@ class FallbackTracker {
     this.toolsUsed = [];
     this.actionLog = [];
     this.savedToolCategories = new Set();
+    this.fallbackPromotions = [];
+  }
+
+  trackFallbackPromotion(toolName, oldSelector, newSelector) {
+    this.fallbackPromotions.push({
+      toolName,
+      oldSelector: typeof oldSelector === 'string' ? oldSelector : JSON.stringify(oldSelector),
+      newSelector: typeof newSelector === 'string' ? newSelector : JSON.stringify(newSelector),
+      timestamp: Date.now(),
+    });
   }
 
   trackFallbackUse(toolName, args) {
