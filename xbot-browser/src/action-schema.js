@@ -122,6 +122,41 @@ const domainConfigSchema = z.object({
   actions: z.array(actionSchema).describe('Actions for this domain'),
 });
 
+// --- Workflow Step Schemas ---
+const workflowStepBase = z.object({
+  action: z.string().describe('Step action type'),
+});
+
+const assertVisibleStepSchema = z.object({
+  action: z.literal('assertVisible'),
+  selector: z.string().describe('CSS/Playwright selector to check visibility'),
+  into: z.string().optional().describe('Variable name to store the boolean result'),
+  timeout: z.number().optional().describe('Visibility check timeout in ms'),
+});
+
+// Note: if and retry schemas reference steps recursively,
+// which Zod handles via z.lazy()
+const ifStepSchema = z.object({
+  action: z.literal('if'),
+  condition: z.string().describe('Variable name to check (prefix with ! to negate)'),
+  then: z.array(z.lazy(() => workflowStepSchema)).optional().describe('Steps to execute if condition is true'),
+  else: z.array(z.lazy(() => workflowStepSchema)).optional().describe('Steps to execute if condition is false'),
+});
+
+const retryStepSchema = z.object({
+  action: z.literal('retry'),
+  maxAttempts: z.number().optional().default(3).describe('Maximum retry attempts'),
+  delayMs: z.number().optional().default(1000).describe('Delay between retries in ms'),
+  steps: z.array(z.lazy(() => workflowStepSchema)).optional().describe('Steps to retry'),
+});
+
+const workflowStepSchema = z.union([
+  assertVisibleStepSchema,
+  ifStepSchema,
+  retryStepSchema,
+  workflowStepBase, // fallback for all other step types
+]);
+
 module.exports = {
   selectorSchema,
   selectorObjectSchema,
@@ -132,4 +167,8 @@ module.exports = {
   executionSchema,
   actionSchema,
   domainConfigSchema,
+  workflowStepSchema,
+  assertVisibleStepSchema,
+  ifStepSchema,
+  retryStepSchema,
 };
